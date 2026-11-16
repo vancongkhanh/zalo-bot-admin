@@ -80,6 +80,10 @@
   .count { font-size: 12px; color: var(--muted); text-align: right; }
   .count.over { color: var(--bad); font-weight: 600; }
   .center { text-align: center; padding: 40px 16px; }
+  .imgrow { display: flex; gap: 10px; align-items: center; border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+  .imgrow img { width: 96px; height: 72px; object-fit: cover; border-radius: 6px; background: var(--chip); display: block; }
+  .imgrow .btn { padding: 5px 10px; }
   @media (max-width: 600px) {
     dialog { width: 100vw; max-width: 100vw; height: 100vh; max-height: 100vh; margin: 0; border-radius: 0; }
     .dlg { max-height: 100vh; }
@@ -109,6 +113,8 @@ const FIREBASE_CONFIG = {
   authDomain: "zalo-bot-tthc-dang.firebaseapp.com",
   projectId: "zalo-bot-tthc-dang",
   appId: "1:921284178915:web:8598615347c0df91da26d6",
+  // Bước E: tên bucket hiện ở Firebase Console > Storage sau khi bật (dạng gs://<tên>).
+  storageBucket: "zalo-bot-tthc-dang.firebasestorage.app",
 };
 const SDK_VERSION = "13.1.0";
 
@@ -119,7 +125,15 @@ const MAX_QUESTIONS = 50;
 const MAX_LINKS = 10;
 const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const STATUSES = ["draft", "approved", "hidden"];
-const CONTENT_FIELDS = ["title", "topic", "questions", "answer", "links", "keywords", "source"];
+const CONTENT_FIELDS = ["title", "topic", "questions", "answer", "links", "keywords", "source", "images"];
+// Bước E: ảnh trong câu trả lời.
+const MAX_IMAGES = 10;
+const MAX_CAPTION_CHARS = 200;
+const IMAGE_MAX_SIDE = 1600;
+const IMAGE_QUALITY = 0.85;
+const MAX_SOURCE_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // giống storage.rules
+const IMAGE_FOLDER = "kb_images";
 const TIMEZONE = "Asia/Ho_Chi_Minh";
 // Giống DEFAULT_CONFIG trong functions/src/config.ts.
 const BOT_DEFAULTS = {
@@ -130,6 +144,7 @@ const BOT_DEFAULTS = {
   monthly_message_limit: 3000,
   monthly_ai_call_limit: 6000,
   ai_model: "claude-haiku-5-5",
+  max_images_per_answer: 4,
 };
 // USD / 1 triệu token, giống scripts/kb/lib/eval.mjs.
 const PRICES = {
@@ -260,7 +275,75 @@ function itemToForm(slug, d) {
     keywords: (d?.keywords ?? []).join(", "),
     source: d?.source ?? "",
     status: d?.status ?? "draft",
+    images: normalizeImages(d?.images),
   };
+}
+
+/** Bản sao danh sách ảnh của mục (bỏ phần tử hỏng). */
+function normalizeImages(images) {
+  if (!Array.isArray(images)) return [];
+  return images
+    .filter((im) => im && typeof im.url === "string" && typeof im.path === "string")
+    .map((im) => ({
+      url: im.url,
+      path: im.path,
+      caption: typeof im.caption === "string" ? im.caption : "",
+      width: Number.isFinite(im.width) ? im.width : 0,
+      height: Number.isFinite(im.height) ? im.height : 0,
+      bytes: Number.isFinite(im.bytes) ? im.bytes : 0,
+    }));
+}
+
+/** Kiểm tra danh sách ảnh của form; ảnh phải nằm trong thư mục của chính mục. */
+function validateImages(images, slug, { localUrls = false } = {}) {
+  const errors = [];
+  const out = [];
+  const list = Array.isArray(images) ? images : [];
+  if (list.length > MAX_IMAGES) errors.push(`Tối đa ${MAX_IMAGES} ảnh mỗi mục`);
+  list.forEach((im, i) => {
+    const caption = oneLine(im?.caption);
+    if (charLength(caption) > MAX_CAPTION_CHARS) errors.push(`Chú thích ảnh ${i + 1} dài quá ${MAX_CAPTION_CHARS} ký tự`);
+    // Bot chỉ gửi link https; link cục bộ chỉ có ở Storage emulator.
+    const okUrl = typeof im?.url === "string"
+      && (im.url.startsWith("https://") || (localUrls && /^http:\/\/(127\.0\.0\.1|localhost):/.test(im.url)));
+    const okPath = typeof im?.path === "string" && im.path.startsWith(`${IMAGE_FOLDER}/${slug}/`);
+    if (!okUrl || !okPath) errors.push(`Ảnh ${i + 1} không hợp lệ (gỡ rồi tải lại)`);
+    out.push({
+      url: im?.url ?? "",
+      path: im?.path ?? "",
+      caption,
+      width: Number.isFinite(im?.width) ? im.width : 0,
+      height: Number.isFinite(im?.height) ? im.height : 0,
+      bytes: Number.isFinite(im?.bytes) ? im.bytes : 0,
+    });
+  });
+  return { images: out, errors };
+}
+
+/** Kích thước sau khi thu nhỏ: cạnh dài tối đa `max`, không phóng to. */
+function scaleSize(width, height, max = IMAGE_MAX_SIDE) {
+  const long = Math.max(width, height);
+  if (!(long > max)) return { width: Math.round(width), height: Math.round(height) };
+  const k = max / long;
+  return { width: Math.max(1, Math.round(width * k)), height: Math.max(1, Math.round(height * k)) };
+}
+
+/** Lý do chặn tệp ảnh trước khi xử lý; null nếu nhận. */
+function imageFileProblem(file) {
+  if (!file || !/^image\//.test(file.type ?? "")) return "Không phải tệp ảnh";
+  if (file.size > MAX_SOURCE_IMAGE_BYTES) {
+    return `Ảnh gốc ${(file.size / 1048576).toFixed(1)} MB, tối đa ${MAX_SOURCE_IMAGE_BYTES / 1048576} MB`;
+  }
+  return null;
+}
+
+/** Câu giải thích bot sẽ gửi ảnh thế nào (form mục). */
+function imageSendNote(count, maxPerAnswer) {
+  if (!count) return "";
+  const max = Number.isInteger(maxPerAnswer) ? maxPerAnswer : BOT_DEFAULTS.max_images_per_answer;
+  if (max === 0) return `Đang tắt gửi ảnh (tối đa 0 ảnh/câu): ${count} ảnh sẽ thành link trong tin chữ.`;
+  if (count <= max) return `Bot gửi tin chữ rồi ${count} ảnh (mỗi ảnh tính 1 tin).`;
+  return `Bot gửi ${max} ảnh đầu, ${count - max} ảnh sau thành link trong tin chữ.`;
 }
 
 /** Lý do không duyệt được; cùng điều kiện với script kb-approve. */
@@ -276,7 +359,7 @@ function approveProblems(item) {
  * Kiểm tra form mục kho. Cùng quy tắc với kb-import (validate.mjs).
  * @returns {{ slug: string, item: object|null, errors: string[], warnings: string[] }}
  */
-function validateItemForm(f, { isNew = false, existingSlugs = new Set() } = {}) {
+function validateItemForm(f, { isNew = false, existingSlugs = new Set(), localImageUrls = false } = {}) {
   const errors = [];
   const warnings = [];
   const slug = cleanText(f.slug);
@@ -305,7 +388,9 @@ function validateItemForm(f, { isNew = false, existingSlugs = new Set() } = {}) 
   if (links.length > MAX_LINKS) errors.push(`Tối đa ${MAX_LINKS} link`);
   const keywords = splitKeywords(f.keywords);
   if (keywords.length > 50) errors.push("Tối đa 50 từ khóa");
-  const item = { title, topic, questions, answer, links, keywords, source, status };
+  const { images, errors: imageErrors } = validateImages(f.images, slug, { localUrls: localImageUrls });
+  errors.push(...imageErrors);
+  const item = { title, topic, questions, answer, links, keywords, source, status, images };
   if (status === "approved") {
     for (const p of approveProblems(item)) errors.push(`Không duyệt được: ${p}`);
   } else {
@@ -316,7 +401,9 @@ function validateItemForm(f, { isNew = false, existingSlugs = new Set() } = {}) 
 }
 
 function diffContent(a, b) {
-  return CONTENT_FIELDS.filter((k) => JSON.stringify(a?.[k] ?? null) !== JSON.stringify(b?.[k] ?? null));
+  // Mục cũ chưa có trường images được coi như danh sách ảnh rỗng.
+  const val = (o, k) => JSON.stringify(k === "images" ? normalizeImages(o?.[k]) : (o?.[k] ?? null));
+  return CONTENT_FIELDS.filter((k) => val(a, k) !== val(b, k));
 }
 
 /** Lưu thay đổi này có ảnh hưởng ngay đến câu trả lời của bot không (cần xác nhận rõ). */
@@ -342,9 +429,9 @@ function buildItemWrite(old, item, email, now) {
       keywords: item.keywords,
       source: item.source,
       status: item.status,
+      images: item.images ?? [],
       version: 1,
       steps: [],
-      image_urls: [],
       hit_count: 0,
       last_hit_at: null,
       created_at: now,
@@ -399,6 +486,11 @@ function settingsFromConfig(raw) {
     handoff_message: typeof r.handoff_message === "string" && r.handoff_message.trim()
       ? r.handoff_message
       : BOT_DEFAULTS.handoff_message,
+    max_images_per_answer: String(
+      Number.isInteger(r.max_images_per_answer) && r.max_images_per_answer >= 0 && r.max_images_per_answer <= MAX_IMAGES
+        ? r.max_images_per_answer
+        : BOT_DEFAULTS.max_images_per_answer,
+    ),
     chats: ids.map((id) => ({ id, label: typeof labels[id] === "string" ? labels[id] : "" })),
   };
 }
@@ -413,6 +505,11 @@ function validateSettings(f) {
   const handoff = cleanText(f.handoff_message);
   if (!handoff) errors.push("Tin chuyển ca trống");
   else if (charLength(handoff) > MAX_HANDOFF_CHARS) errors.push(`Tin chuyển ca tối đa ${MAX_HANDOFF_CHARS} ký tự`);
+  const maxImagesText = String(f.max_images_per_answer ?? BOT_DEFAULTS.max_images_per_answer).trim();
+  const maxImages = Number(maxImagesText);
+  if (!/^\d+$/.test(maxImagesText) || maxImages > MAX_IMAGES) {
+    errors.push(`Số ảnh mỗi câu trả lời phải là số nguyên từ 0 đến ${MAX_IMAGES}`);
+  }
   const ids = [];
   const labels = {};
   for (const c of f.chats ?? []) {
@@ -443,6 +540,7 @@ function validateSettings(f) {
       reply_enabled: !!f.reply_enabled,
       confidence_threshold: threshold,
       handoff_message: handoff,
+      max_images_per_answer: maxImages,
       allowed_chat_ids: ids,
       chat_labels: labels,
     },
@@ -520,11 +618,13 @@ function filterItems(entries, { q = "", status = "", topic = "" } = {}) {
 // Giao diện
 // =====================================================================
 const base = `https://www.gstatic.com/firebasejs/${SDK_VERSION}`;
-const [appMod, authMod, fsMod] = await Promise.all([
+const [appMod, authMod, fsMod, stMod] = await Promise.all([
   import(`${base}/firebase-app.js`),
   import(`${base}/firebase-auth.js`),
   import(`${base}/firebase-firestore.js`),
+  import(`${base}/firebase-storage.js`),
 ]);
+const { getStorage, connectStorageEmulator, ref: storageRef, uploadBytes, getDownloadURL } = stMod;
 const { initializeApp } = appMod;
 const {
   getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, signInWithCredential, signOut, onAuthStateChanged,
@@ -586,6 +686,13 @@ function errText(e) {
     return "Thiếu chỉ mục Firestore. Chạy: firebase deploy --only firestore:indexes rồi chờ vài phút.";
   }
   if (code === "unavailable") return "Mất kết nối tới Firestore. Thử lại sau.";
+  if (code === "storage/unauthorized") {
+    return "Storage từ chối tải ảnh (chưa có quyền, ảnh quá 5 MB hoặc quy tắc Storage chưa triển khai).";
+  }
+  if (code === "storage/unknown" || code === "storage/bucket-not-found" || code === "storage/project-not-found") {
+    return "Chưa kết nối được Firebase Storage (đã bật Storage và đúng tên bucket trong FIREBASE_CONFIG chưa?).";
+  }
+  if (code === "storage/retry-limit-exceeded") return "Tải ảnh quá lâu, mạng chậm. Thử lại.";
   return e?.message ? String(e.message) : String(e);
 }
 
@@ -601,6 +708,7 @@ const fmtNum = new Intl.NumberFormat("vi-VN");
 const pct = (v) => (v === null ? "-" : `${Math.round(v * 100)}%`);
 
 function openDialog(...items) {
+  $dlg.onpaste = null; // form mục tự gắn lại để nhận ảnh dán
   $dlgBody.replaceChildren(...nodes(items));
   if (!$dlg.open) $dlg.showModal();
 }
@@ -620,20 +728,30 @@ if (!emulator && (!FIREBASE_CONFIG.apiKey || !FIREBASE_CONFIG.appId)) {
 }
 // Emulator dùng dự án demo (giống admin/package.json), không bao giờ chạm dữ liệu thật.
 const app = initializeApp(emulator
-  ? { apiKey: "emulator-key", appId: "emulator", projectId: "demo-zalo-bot", authDomain: "demo-zalo-bot.firebaseapp.com" }
+  ? {
+    apiKey: "emulator-key", appId: "emulator", projectId: "demo-zalo-bot", authDomain: "demo-zalo-bot.firebaseapp.com",
+    storageBucket: "demo-zalo-bot.appspot.com",
+  }
   : FIREBASE_CONFIG);
 const auth = getAuth(app);
 const db = getFirestore(app);
+const storage = getStorage(app);
 if (emulator) {
   connectAuthEmulator(auth, "http://127.0.0.1:9099", { disableWarnings: true });
   connectFirestoreEmulator(db, "127.0.0.1", 8080);
+  connectStorageEmulator(storage, "127.0.0.1", 9199);
 }
 
-const state = { user: null, tab: "unanswered", kb: new Map() };
+const state = { user: null, tab: "unanswered", kb: new Map(), maxImages: BOT_DEFAULTS.max_images_per_answer };
 
 async function loadKb() {
-  const snap = await getDocs(collection(db, "kb_items"));
+  const [snap, cfg] = await Promise.all([
+    getDocs(collection(db, "kb_items")),
+    getDoc(doc(db, "config", "main")).catch(() => null),
+  ]);
   state.kb = new Map(snap.docs.map((d) => [d.id, d.data()]));
+  // Số ảnh bot gửi mỗi câu (để form mục giải thích ảnh nào thành link).
+  if (cfg?.exists()) state.maxImages = Number(settingsFromConfig(cfg.data()).max_images_per_answer);
   return state.kb;
 }
 
@@ -858,6 +976,7 @@ function pickContent(d) {
     links: d.links ?? [],
     keywords: d.keywords ?? [],
     source: d.source ?? "",
+    images: normalizeImages(d.images),
   };
 }
 
@@ -903,9 +1022,9 @@ function itemEditor({ slug, form, heading, unansweredId, onDone }) {
   };
   const slugInput = h("input", { disabled: !isNew, autocomplete: "off" });
   const titleInput = h("input", { autocomplete: "off" });
+  // Gợi ý mã mục theo tiêu đề cho tới khi người dùng tự sửa mã (hoặc đã tải ảnh lên).
+  let auto = isNew && f.slug === suggestSlug(f.title);
   if (isNew) {
-    // Gợi ý mã mục theo tiêu đề cho tới khi người dùng tự sửa mã.
-    let auto = f.slug === suggestSlug(f.title);
     slugInput.addEventListener("input", () => (auto = false));
     titleInput.addEventListener("input", () => {
       if (auto) {
@@ -923,20 +1042,133 @@ function itemEditor({ slug, form, heading, unansweredId, onDone }) {
   const saveBtn = h("button", { class: "btn primary" }, "Lưu");
   const existing = new Set(state.kb.keys());
 
+  // ----- Ảnh (bước E) -----
+  f.images = normalizeImages(f.images);
+  let uploading = 0;
+  const imagesBox = h("div");
+  const imageNote = h("p", { class: "muted", style: "margin:4px 0" });
+  const imageMsg = h("div");
+  const fileInput = h("input", { type: "file", accept: "image/jpeg,image/png,image/webp", multiple: true, hidden: true });
+  const addImageBtn = h("button", { class: "btn", type: "button", onclick: () => fileInput.click() }, "+ Thêm ảnh");
+  fileInput.addEventListener("change", () => {
+    const files = [...fileInput.files];
+    fileInput.value = "";
+    addImages(files);
+  });
+
+  const moveImage = (i, d) => {
+    const j = i + d;
+    if (j < 0 || j >= f.images.length) return;
+    [f.images[i], f.images[j]] = [f.images[j], f.images[i]];
+    drawImages();
+    check();
+  };
+
+  function drawImages() {
+    const n = f.images.length;
+    imagesBox.replaceChildren(...f.images.map((im, i) => {
+      const cap = h("input", {
+        value: im.caption, autocomplete: "off", class: "grow", maxlength: MAX_CAPTION_CHARS,
+        placeholder: `Chú thích (để trống: "Bước ${i + 1}/${n}")`,
+      });
+      cap.addEventListener("input", () => {
+        im.caption = cap.value;
+        check();
+      });
+      return h("div", { class: "imgrow" },
+        h("a", { href: im.url, target: "_blank", rel: "noopener noreferrer", title: "Mở ảnh" },
+          h("img", { src: im.url, alt: `Ảnh ${i + 1}`, loading: "lazy" })),
+        h("div", { class: "grow" },
+          h("div", { class: "row" }, h("b", {}, `Ảnh ${i + 1}`),
+            h("span", { class: "muted" }, im.width ? `${im.width}×${im.height}, ${Math.round(im.bytes / 1024)} KB` : "")),
+          cap),
+        h("div", { class: "row", style: "flex-wrap:nowrap" },
+          h("button", { class: "btn", type: "button", title: "Lên", disabled: i === 0, onclick: () => moveImage(i, -1) }, "↑"),
+          h("button", { class: "btn", type: "button", title: "Xuống", disabled: i === n - 1, onclick: () => moveImage(i, 1) }, "↓"),
+          h("button", {
+            class: "btn danger", type: "button",
+            onclick: () => {
+              f.images.splice(i, 1);
+              drawImages();
+              check();
+            },
+          }, "Gỡ")),
+      );
+    }));
+    imageNote.textContent = n
+      ? `${n}/${MAX_IMAGES} ảnh. ${imageSendNote(n, state.maxImages)} Gỡ ảnh chỉ bỏ khỏi mục, tệp vẫn còn trong Storage.`
+      : `Chưa có ảnh. Chọn tệp hoặc dán ảnh chụp màn hình (Ctrl+V) khi đang mở form. Tối đa ${MAX_IMAGES} ảnh.`;
+    addImageBtn.disabled = n >= MAX_IMAGES;
+  }
+
+  /** Thư mục ảnh theo slug: mục mới phải có slug hợp lệ, chưa trùng, trước khi tải ảnh. */
+  function imageSlug() {
+    const s = isNew ? cleanText(f.slug) : slug;
+    if (!s || !SLUG_PATTERN.test(s) || s.length > 80) return { error: "Nhập mã mục (slug) hợp lệ trước khi thêm ảnh." };
+    if (isNew && existing.has(s)) return { error: `Mã mục "${s}" đã có trong kho.` };
+    return { slug: s };
+  }
+
+  async function addImages(files) {
+    imageMsg.replaceChildren();
+    const target = imageSlug();
+    if (target.error) return imageMsg.replaceChildren(msg("bad", target.error));
+    const room = MAX_IMAGES - f.images.length - uploading;
+    const problems = [];
+    if (files.length > room) problems.push(`Chỉ thêm được ${Math.max(0, room)} ảnh nữa (tối đa ${MAX_IMAGES}).`);
+    const accepted = [];
+    for (const file of files.slice(0, Math.max(0, room))) {
+      const p = imageFileProblem(file);
+      if (p) problems.push(`${file.name || "Ảnh dán"}: ${p}`);
+      else accepted.push(file);
+    }
+    if (!accepted.length) return imageMsg.replaceChildren(list("errs", problems));
+    if (isNew) {
+      // Đường dẫn ảnh theo slug: khóa slug sau khi đã tải ảnh.
+      slugInput.disabled = true;
+      auto = false;
+    }
+    uploading += accepted.length;
+    check();
+    const status = h("p", { class: "muted" }, `Đang xử lý và tải ${accepted.length} ảnh…`);
+    imageMsg.replaceChildren(status, list("errs", problems));
+    for (const file of accepted) {
+      try {
+        f.images.push(await uploadImage(target.slug, file));
+        drawImages();
+      } catch (e) {
+        console.error(e);
+        problems.push(`${file.name || "Ảnh dán"}: ${errText(e)}`);
+      } finally {
+        uploading--;
+        check();
+      }
+    }
+    imageMsg.replaceChildren(...nodes(problems.length ? list("errs", problems) : null));
+  }
+
+  $dlg.onpaste = (e) => {
+    const files = [...(e.clipboardData?.files ?? [])].filter((x) => /^image\//.test(x.type));
+    if (!files.length) return;
+    e.preventDefault();
+    addImages(files);
+  };
+
   function check() {
     const len = charLength(cleanText(f.answer));
     counter.textContent = `${len}/${MAX_ANSWER_CHARS} ký tự`;
     counter.className = len > MAX_ANSWER_CHARS ? "count over" : "count";
-    const res = validateItemForm(f, { isNew, existingSlugs: existing });
+    const res = validateItemForm(f, { isNew, existingSlugs: existing, localImageUrls: emulator });
     confirmRow.hidden = !(res.item && needsLiveConfirm(old, res.item));
     errList.replaceChildren(...[list("errs", res.errors), list("warns", res.warnings)].filter(Boolean));
-    saveBtn.disabled = !res.item;
+    saveBtn.disabled = !res.item || uploading > 0;
+    saveBtn.textContent = uploading > 0 ? "Đang tải ảnh…" : "Lưu";
     return res;
   }
 
   saveBtn.addEventListener("click", async () => {
     const res = check();
-    if (!res.item) return;
+    if (!res.item || uploading > 0) return;
     if (needsLiveConfirm(old, res.item) && !confirmBox.checked) {
       return errList.replaceChildren(msg("bad", "Đánh dấu ô xác nhận trước khi lưu mục đã duyệt."));
     }
@@ -973,6 +1205,12 @@ function itemEditor({ slug, form, heading, unansweredId, onDone }) {
     field("answer", "Nội dung trả lời", "bot gửi nguyên văn", answerInput),
     counter,
     field("links", "Link", 'mỗi dòng "Nhãn | https://..."', h("textarea", { rows: 3 })),
+    h("label", { class: "f" }, "Ảnh", h("span", { class: "hint" },
+      " gửi sau tin chữ, theo thứ tự dưới đây; trang tự thu nhỏ còn cạnh dài 1.600 px")),
+    imageNote,
+    imagesBox,
+    h("div", { class: "row" }, addImageBtn, fileInput),
+    imageMsg,
     field("keywords", "Từ khóa", "cách nhau bằng dấu phẩy", h("input", { autocomplete: "off" })),
     field("source", "Nguồn", "bắt buộc khi duyệt", h("input", { autocomplete: "off" })),
     field("status", "Trạng thái", "chỉ mục Đã duyệt mới được bot dùng; không xóa mục, dùng Đã ẩn", statusSelect),
@@ -983,7 +1221,31 @@ function itemEditor({ slug, form, heading, unansweredId, onDone }) {
       saveBtn,
     ),
   );
+  drawImages();
   check();
+}
+
+/** Thu nhỏ, chuyển JPEG (quyết định 9), tải lên Storage, trả phần tử của `images`. */
+async function uploadImage(slug, file) {
+  const bmp = await createImageBitmap(file);
+  const size = scaleSize(bmp.width, bmp.height);
+  const canvas = document.createElement("canvas");
+  canvas.width = size.width;
+  canvas.height = size.height;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#ffffff"; // nền trắng cho ảnh PNG trong suốt
+  ctx.fillRect(0, 0, size.width, size.height);
+  ctx.drawImage(bmp, 0, 0, size.width, size.height);
+  bmp.close?.();
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", IMAGE_QUALITY));
+  if (!blob) throw new Error("Trình duyệt không chuyển được ảnh sang JPEG.");
+  if (blob.size > MAX_UPLOAD_BYTES) throw new Error("Ảnh sau khi nén vẫn quá 5 MB.");
+  const id = crypto.randomUUID().replace(/-/g, "");
+  const path = `${IMAGE_FOLDER}/${slug}/${id}.jpg`;
+  const r = storageRef(storage, path);
+  await uploadBytes(r, blob, { contentType: "image/jpeg", cacheControl: "public, max-age=31536000" });
+  const url = await getDownloadURL(r);
+  return { url, path, caption: "", width: size.width, height: size.height, bytes: blob.size };
 }
 
 // ---------- Màn: Kho tri thức ----------
@@ -1009,6 +1271,7 @@ async function renderKb(notice) {
         d.topic ? h("span", { class: "chip" }, d.topic) : null,
         h("span", {}, slug),
         h("span", {}, `${d.questions?.length ?? 0} cách hỏi`),
+        d.images?.length ? h("span", {}, `${d.images.length} ảnh`) : null,
         h("span", {}, `bot dùng ${fmtNum.format(d.hit_count ?? 0)} lần`),
       ))),
     );
@@ -1087,6 +1350,8 @@ async function renderStats() {
     h("div", { class: "tiles" },
       tile("Tin đã gửi (hạn mức Zalo)", `${fmtNum.format(sent)} / ${fmtNum.format(msgLimit)}`, meter(sent, msgLimit)),
       tile("Lỗi gửi tin", fmtNum.format(usage.send_errors ?? 0)),
+      tile("Ảnh đã gửi", fmtNum.format(usage.photos_sent ?? 0),
+        h("span", { class: "muted" }, `đã tính trong tin đã gửi; lỗi ảnh: ${fmtNum.format(usage.photo_errors ?? 0)}`)),
       tile("Lượt gọi AI", `${fmtNum.format(aiCalls)} / ${fmtNum.format(aiLimit)}`, meter(aiCalls, aiLimit)),
       tile("Lỗi AI", fmtNum.format(usage.ai_errors ?? 0)),
       tile("Token vào / ra", `${fmtNum.format(usage.ai_input_tokens ?? 0)} / ${fmtNum.format(usage.ai_output_tokens ?? 0)}`),
@@ -1165,6 +1430,10 @@ async function renderSettings(notice) {
     countHandoff();
   });
   countHandoff();
+  const maxImages = h("input", {
+    type: "number", min: 0, max: MAX_IMAGES, step: 1, value: f.max_images_per_answer, style: "max-width:140px",
+  });
+  maxImages.addEventListener("input", () => (f.max_images_per_answer = maxImages.value));
 
   const save = async () => {
     const { data, errors } = validateSettings(f);
@@ -1196,6 +1465,9 @@ async function renderSettings(notice) {
       h("label", { class: "f" }, "Tin chuyển ca", h("span", { class: "hint" }, " gửi khi bot không trả lời được")),
       handoff,
       handoffCount,
+      h("label", { class: "f" }, "Số ảnh gửi mỗi câu trả lời",
+        h("span", { class: "hint" }, ` 0-${MAX_IMAGES}; mỗi ảnh tính 1 tin; ảnh vượt số này thành link; 0 = không gửi ảnh`)),
+      maxImages,
     ),
     h("div", { class: "card" },
       h("h3", { style: "margin-top:0" }, "Nhóm Zalo được phép"),
