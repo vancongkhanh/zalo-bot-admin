@@ -1,10 +1,152 @@
 rules_version = '2';
-// Giai đoạn 1: chỉ Cloud Functions (Admin SDK, bỏ qua quy tắc này) được đọc/ghi.
-// Mọi truy cập từ client đều bị từ chối.
+// Bước D: trang quản trị (client, Firebase Auth Google).
+// Cloud Functions và script kb dùng Admin SDK nên không bị các quy tắc này giới hạn.
+// Chỉ tài khoản có tài liệu admins/{uid} (bạn tạo thủ công) mới đọc/ghi được.
+// Mọi đường dẫn không khớp bên dưới đều bị từ chối (mặc định của Firestore).
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /{document=**} {
-      allow read, write: if false;
+
+    function signedIn() {
+      return request.auth != null;
     }
+
+    function isAdmin() {
+      return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    // Email đã xác minh của người đăng nhập, ghi vào approved_by / updated_by.
+    function adminEmail() {
+      return request.auth.token.email;
+    }
+
+    function changed() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    // ---------- admins: chỉ đọc tài liệu của chính mình (để trang biết có quyền không) ----------
+    match /admins/{uid} {
+      allow get: if signedIn() && request.auth.uid == uid;
+    }
+
+    // ---------- kb_items ----------
+    function isStr(v, min, max) {
+      return v is string && v.size() >= min && v.size() <= max;
+    }
+
+    function validContent(d) {
+      return isStr(d.title, 1, 200)
+        && isStr(d.topic, 0, 100)
+        && d.questions is list && d.questions.size() <= 50
+        && isStr(d.answer, 1, 1500)
+        && d.links is list && d.links.size() <= 10
+        && d.keywords is list && d.keywords.size() <= 50
+        && isStr(d.source, 0, 500)
+        && d.status in ['draft', 'approved', 'hidden']
+        && d.version is int;
+    }
+
+    // Cùng điều kiện duyệt với script kb-approve.
+    function approvable(d) {
+      return d.questions.size() >= 2 && d.source.size() > 0;
+    }
+
+    function kbKeys() {
+      return ['title', 'topic', 'questions', 'answer', 'links', 'keywords', 'source', 'status',
+              'steps', 'image_urls', 'hit_count', 'last_hit_at', 'version',
+              'created_at', 'updated_at', 'approved_at', 'approved_by', 'updated_by'];
+    }
+
+    match /kb_items/{slug} {
+      allow read: if isAdmin();
+
+      allow create: if isAdmin()
+        && slug.matches('^[a-z0-9]+(-[a-z0-9]+)*$') && slug.size() <= 80
+        && request.resource.data.keys().hasOnly(kbKeys())
+        && validContent(request.resource.data)
+        && request.resource.data.version == 1
+        && request.resource.data.hit_count == 0
+        && request.resource.data.last_hit_at == null
+        && request.resource.data.steps == []
+        && request.resource.data.image_urls == []
+        && request.resource.data.created_at == request.time
+        && request.resource.data.updated_at == request.time
+        && request.resource.data.updated_by == adminEmail()
+        && (request.resource.data.status != 'approved'
+            ? request.resource.data.approved_at == null && request.resource.data.approved_by == null
+            : approvable(request.resource.data)
+              && request.resource.data.approved_at == request.time
+              && request.resource.data.approved_by == adminEmail());
+
+      // Không đụng bộ đếm của bot (hit_count, last_hit_at), ngày tạo, phần chừa cho PDF.
+      // Mục approved sau khi lưu phải có approved_by là email người vừa lưu.
+      allow update: if isAdmin()
+        && request.resource.data.keys().hasOnly(kbKeys())
+        && validContent(request.resource.data)
+        && !changed().hasAny(['hit_count', 'last_hit_at', 'created_at', 'steps', 'image_urls'])
+        && (request.resource.data.version == resource.data.version
+            || request.resource.data.version == resource.data.version + 1)
+        && request.resource.data.updated_at == request.time
+        && request.resource.data.updated_by == adminEmail()
+        && (request.resource.data.status != 'approved'
+            || (approvable(request.resource.data)
+                && request.resource.data.approved_by == adminEmail()
+                && request.resource.data.approved_at == request.time));
+
+      // Không xóa mục: dùng trạng thái hidden.
+      allow delete: if false;
+    }
+
+    // ---------- unanswered: bot tạo; trang chỉ đổi trạng thái xử lý ----------
+    match /unanswered/{id} {
+      allow read: if isAdmin();
+      allow update: if isAdmin()
+        && changed().hasOnly(['status', 'answered_slug', 'answered_at', 'handled_by'])
+        && request.resource.data.handled_by == adminEmail()
+        && (
+          (request.resource.data.status == 'answered'
+            && request.resource.data.answered_slug is string
+            && request.resource.data.answered_at == request.time)
+          || request.resource.data.status == 'ignored'
+        );
+      allow create, delete: if false;
+    }
+
+    // ---------- chỉ đọc ----------
+    match /stats_daily/{day} {
+      allow read: if isAdmin();
+    }
+    match /usage/{month} {
+      allow read: if isAdmin();
+    }
+    match /conversations/{id} {
+      allow read: if isAdmin();
+    }
+
+    // ---------- config/main: chỉ sửa các trường của màn Cài đặt ----------
+    match /config/{docId} {
+      allow get: if isAdmin() && docId == 'main';
+      allow update: if isAdmin() && docId == 'main'
+        && changed().hasOnly(['ai_enabled', 'confidence_threshold', 'handoff_message', 'reply_enabled',
+                              'allowed_chat_ids', 'chat_labels', 'updated_at', 'updated_by'])
+        && request.resource.data.updated_at == request.time
+        && request.resource.data.updated_by == adminEmail()
+        && (!('ai_enabled' in request.resource.data) || request.resource.data.ai_enabled is bool)
+        && (!('reply_enabled' in request.resource.data) || request.resource.data.reply_enabled is bool)
+        && (!('confidence_threshold' in request.resource.data)
+            || (request.resource.data.confidence_threshold is number
+                && request.resource.data.confidence_threshold >= 0
+                && request.resource.data.confidence_threshold <= 1))
+        && (!('handoff_message' in request.resource.data)
+            || isStr(request.resource.data.handoff_message, 1, 1000))
+        && (!('allowed_chat_ids' in request.resource.data)
+            || (request.resource.data.allowed_chat_ids is list
+                && request.resource.data.allowed_chat_ids.size() <= 50))
+        && (!('chat_labels' in request.resource.data)
+            || (request.resource.data.chat_labels is map
+                && request.resource.data.chat_labels.size() <= 50));
+      allow create, delete: if false;
+    }
+
+    // processed_events, eval_testset và mọi thứ khác: không mở cho client.
   }
 }

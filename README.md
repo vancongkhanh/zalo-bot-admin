@@ -26,6 +26,10 @@ scripts/
   send-sample.mjs     gửi sự kiện mẫu tới hàm để thử, in mã HTTP và thời gian
   sample-event.json   sự kiện mẫu (toàn giá trị giả)
   test-photo.mjs      thử sendPhoto (ngoài phạm vi giai đoạn 1)
+  kb/                 script kho tri thức và đo chất lượng (bước B, C), xem scripts/kb/README.md
+admin/
+  index.html          trang quản trị (bước D), một tệp, đưa lên GitHub Pages; xem admin/README.md
+  test/               kiểm thử logic của trang và quy tắc Firestore (emulator)
 ```
 
 ## Bí mật
@@ -99,6 +103,8 @@ npm test
 ```
 firebase deploy --only functions,firestore
 ```
+
+Từ bước D, `firestore.rules` cho phép tài khoản có trong `admins/{uid}` đọc/ghi qua trang quản trị. Muốn triển khai riêng hàm mà chưa mở quy tắc mới: `firebase deploy --only functions`. Chỉ triển khai quy tắc và chỉ mục: `firebase deploy --only firestore`.
 
 ## Đăng ký webhook
 

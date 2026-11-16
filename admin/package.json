@@ -1,0 +1,16 @@
+{
+  "name": "zalo-bot-admin-tests",
+  "private": true,
+  "type": "module",
+  "description": "Kiểm thử cho trang quản trị (index.html) và quy tắc Firestore. Không cần cho GitHub Pages.",
+  "scripts": {
+    "test": "vitest run test/logic.test.mjs",
+    "test:rules": "firebase emulators:exec --only firestore --project demo-zalo-bot \"vitest run test/rules.test.mjs\"",
+    "emulator": "firebase emulators:start --only firestore,auth --project demo-zalo-bot"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^6.0.0",
+    "firebase": "^13.1.0",
+    "vitest": "^5.1.0"
+  }
+}
