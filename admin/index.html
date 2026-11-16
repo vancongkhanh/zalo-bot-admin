@@ -1035,7 +1035,8 @@ function itemEditor({ slug, form, heading, unansweredId, onDone }) {
   const answerInput = h("textarea", { rows: 8 });
   const counter = h("div", { class: "count" });
   const statusSelect = h("select", {}, STATUSES.map((s) => h("option", { value: s }, STATUS_LABELS[s])));
-  const confirmBox = h("input", { type: "checkbox" });
+  // Ô xác nhận đánh dấu sẵn (theo yêu cầu 16/11/2026); bỏ đánh dấu thì không lưu được mục đã duyệt.
+  const confirmBox = h("input", { type: "checkbox", checked: true });
   const confirmRow = h("label", { class: "row", style: "margin-top:10px" }, confirmBox,
     "Tôi xác nhận: sau khi lưu, bot sẽ gửi nguyên văn nội dung này cho người hỏi.");
   const errList = h("div");

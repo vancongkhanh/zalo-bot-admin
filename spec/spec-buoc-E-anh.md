@@ -1,6 +1,6 @@
 # Spec bước E: ảnh trong câu trả lời
 
-Dành cho Claude Code. Ngày soạn: 16/11/2026. Trạng thái: **bạn đã duyệt ngày 16/11/2026; đã viết mã và kiểm thử trên emulator; chưa triển khai** (xem mục 9). Đọc kèm [spec-buoc-A-B-C-D.md](spec-buoc-A-B-C-D.md) (spec này sửa quyết định 7 của spec đó: "Ảnh trong câu trả lời: chưa làm").
+Dành cho Claude Code. Ngày soạn: 16/11/2026. Trạng thái: **bạn đã duyệt ngày 16/11/2026; đã triển khai 16/11/2026; chờ thử thật** (xem mục 9). Đọc kèm [spec-buoc-A-B-C-D.md](spec-buoc-A-B-C-D.md) (spec này sửa quyết định 7 của spec đó: "Ảnh trong câu trả lời: chưa làm").
 
 ## 0. Căn cứ và phạm vi
 
@@ -185,6 +185,6 @@ Trang quản trị (màn Cài đặt) được sửa trường này.
 
 ### 9.4 Việc còn lại trước khi dùng thật
 
-1. Bạn bật Storage và chọn vùng (mục 7). Đối chiếu tên bucket với `storageBucket` trong `admin/index.html`.
-2. Triển khai, khi bạn đồng ý: `firebase deploy --only storage`, `firebase deploy --only firestore`, `firebase deploy --only functions`. Rồi tải `admin/index.html` lên kho `zalo-bot-admin`.
+1. ~~Bật Storage~~: bạn đã bật. Tên bucket khớp `storageBucket` trong `admin/index.html`.
+2. ~~Triển khai~~: xong 16/11/2026 (`storage`, `firestore`, `functions`). Còn tải `admin/index.html` lên kho `zalo-bot-admin`.
 3. Thử E1-E5, E7-E10 thật. Đặc biệt xác nhận Zalo nhận được link tải của Firebase Storage (mới thử ảnh trên GitHub Pages).

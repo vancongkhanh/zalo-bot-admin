@@ -15,7 +15,7 @@ Bot Zalo trả lời câu hỏi hướng dẫn sử dụng trong nhóm Zalo. Ng�
 | B | Script nạp/xuất/duyệt kho từ Excel (`scripts/kb`) | Xong, đạt B1-B6 |
 | C | AI chọn mục, trả lời nguyên văn, chuyển ca, `unanswered`, thống kê | Đã triển khai 16/11 16:21, `ai_enabled` đang bật; C2, C3, C8 đạt khi chạy thật |
 | D | Trang quản trị + quy tắc Firestore | Quy tắc đã triển khai; trang đã lên GitHub Pages; chờ tạo `admins/{uid}` để thử D2-D6 |
-| E | Ảnh trong câu trả lời (Firebase Storage, `sendPhoto`) | Đã viết mã và kiểm thử trên emulator; **chưa triển khai**: chờ bật Storage. Xem [spec/spec-buoc-E-anh.md](spec/spec-buoc-E-anh.md) |
+| E | Ảnh trong câu trả lời (Firebase Storage, `sendPhoto`) | Đã triển khai 16/11/2026 (Storage `US-CENTRAL1`, quy tắc, hàm); chờ tải trang mới lên GitHub và thử E1-E10 thật. Xem [spec/spec-buoc-E-anh.md](spec/spec-buoc-E-anh.md) |
 
 Xem [báo cáo/bao-cao-buoc-B-C-D.md](báo%20cáo/bao-cao-buoc-B-C-D.md) để biết tiêu chí từng bước, chi phí đo được và việc còn lại.
 
@@ -142,7 +142,7 @@ Nhóm không có trong danh sách: không ghi `conversations`, chỉ ghi dòng C
 | Quy tắc Storage (bước E) | `firebase deploy --only storage`. Chỉ chạy được **sau khi bật Storage** trong Console. Lần đầu CLI có thể hỏi cấp quyền cho Storage đọc Firestore (cần cho kiểm tra `admins`): trả lời Yes |
 | Trang quản trị | Tải `admin/index.html` lên kho GitHub `zalo-bot-admin` (thay tệp cũ). Xem [admin/README.md](admin/README.md) |
 
-Lần triển khai gần nhất: hàm có bước C (16/11/2026 16:21), quy tắc và chỉ mục bước D (16/11/2026). Bước E chưa triển khai. `firebase.json` đã có mục `storage`, nên `firebase deploy` không kèm `--only` sẽ báo lỗi cho tới khi bật Storage: luôn dùng `--only`. Nếu `firebase deploy` báo lỗi "Failed to make request ... adminSdkConfig", chạy lại: thường là lỗi mạng tạm thời.
+Lần triển khai gần nhất: hàm có bước C (16/11/2026 16:21), quy tắc và chỉ mục bước D (16/11/2026). Bước E (16/11/2026): `firebase deploy --only storage`, rồi `--only firestore,functions`. Nên luôn dùng `--only` để triển khai đúng phần cần. Nếu `firebase deploy` báo lỗi "Failed to make request ... adminSdkConfig", chạy lại: thường là lỗi mạng tạm thời.
 
 ## Đăng ký webhook
 

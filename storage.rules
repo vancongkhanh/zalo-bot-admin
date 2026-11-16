@@ -6,6 +6,8 @@ service firebase.storage {
   match /b/{bucket}/o {
 
     // Cùng điều kiện với firestore.rules: có tài liệu admins/{uid} (bạn tạo thủ công).
+    // Cần vai trò "Firebase Rules Firestore Service Agent" cho tài khoản dịch vụ của Storage
+    // (firebase deploy --only storage hỏi cấp khi quy tắc thay đổi; chọn Yes).
     function isAdmin() {
       return request.auth != null
         && firestore.exists(/databases/(default)/documents/admins/$(request.auth.uid));

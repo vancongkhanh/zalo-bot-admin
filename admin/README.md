@@ -7,7 +7,7 @@
 | Màn | Việc |
 |---|---|
 | Câu chưa trả lời | `unanswered` trạng thái `new`, xếp theo số lần hỏi rồi lần hỏi cuối (tối đa 100). Mỗi câu có 3 thao tác: **Soạn đáp án mới** (form điền sẵn tiêu đề và cách hỏi từ câu mẫu), **Gắn vào mục có sẵn** (thêm câu vào cách hỏi của mục, mặc định là mục AI đoán gần nhất), **Bỏ qua** |
-| Kho tri thức | Tìm (không cần dấu), lọc theo trạng thái và nhóm, thêm, sửa, duyệt, ẩn. Chặn lưu khi trả lời > 1.500 ký tự hoặc link sai. Sửa mục đã duyệt (kể cả đổi ảnh) phải đánh dấu ô xác nhận. Không xóa mục |
+| Kho tri thức | Tìm (không cần dấu), lọc theo trạng thái và nhóm, thêm, sửa, duyệt, ẩn. Chặn lưu khi trả lời > 1.500 ký tự hoặc link sai. Sửa mục đã duyệt (kể cả đổi ảnh) hiện ô xác nhận, đánh dấu sẵn; bỏ đánh dấu thì không lưu. Không xóa mục |
 | Ảnh của mục (bước E) | Trong form mục: **+ Thêm ảnh** (chọn nhiều tệp) hoặc dán ảnh chụp màn hình bằng Ctrl+V khi form đang mở. Trang thu nhỏ còn cạnh dài 1.600 px, chuyển JPEG 85%, rồi tải lên Storage `kb_images/{slug}/`. Chặn tệp gốc > 10 MB. Nút ↑ ↓ đổi thứ tự (là thứ tự bot gửi), ô chú thích (trống thì bot ghi "Bước i/n"), nút **Gỡ**. Tối đa 10 ảnh. Ảnh chỉ vào mục khi bấm **Lưu**; Hủy hoặc Gỡ thì tệp vẫn nằm trong Storage. Mục mới phải có mã mục hợp lệ trước khi thêm ảnh, và mã bị khóa sau khi đã tải ảnh |
 | Thống kê | Tháng hiện tại: tin đã gửi so với hạn mức (đã gồm ảnh), ảnh đã gửi, lượt gọi AI so với hạn mức, token, chi phí ước tính. Theo ngày (7/30/90 ngày): câu hỏi, tỷ lệ tự trả lời, chuyển ca, lỗi AI, mục dùng nhiều nhất. Số liệu chung cho mọi nhóm |
 | Cài đặt | `reply_enabled`, `ai_enabled`, `confidence_threshold`, `handoff_message`, `max_images_per_answer` (0-10), danh sách nhóm và **tên dễ nhớ cho từng mã nhóm** (lưu ở `config/main.chat_labels`) |
@@ -22,8 +22,8 @@ Mỗi lần lưu ghi `updated_by` (email người đăng nhập). Mục duyệt 
 | Kho GitHub | `vancongkhanh/zalo-bot-admin` (Public, GitHub Pages từ nhánh `main`, thư mục gốc). Chỉ chứa `index.html` |
 | Firebase Web app | "Quan tri Bot TTHC" (tạo 16/11/2026 bằng `firebase apps:create`); `apiKey`, `appId` đã điền trong `index.html` |
 | Đăng nhập | Firebase Auth, Google. Tên miền được phép: `vancongkhanh.github.io` (và `localhost` mặc định) |
-| Quy tắc, chỉ mục | Đã triển khai 16/11/2026 (`firebase deploy --only firestore`). Bản có ảnh (bước E) **chưa triển khai** |
-| Storage (bước E) | **Chưa bật.** Bucket ghi sẵn trong `FIREBASE_CONFIG.storageBucket` là `zalo-bot-tthc-dang.firebasestorage.app`: sau khi bật, đối chiếu tên ở Console > Storage (dạng `gs://<tên>`) và sửa nếu khác |
+| Quy tắc, chỉ mục | Đã triển khai 16/11/2026 (`firebase deploy --only firestore`). Bản có ảnh (bước E) triển khai 16/11/2026 |
+| Storage (bước E) | Bucket `zalo-bot-tthc-dang.firebasestorage.app` (đã đối chiếu, khớp `FIREBASE_CONFIG.storageBucket`); `storage.rules` triển khai 16/11/2026 |
 
 ## Cài đặt lần đầu (đã làm, ghi lại để làm lại khi cần)
 
