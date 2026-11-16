@@ -17,3 +17,10 @@ scripts/*.local.json
 *Secret*.txt
 *token*.txt
 *Token*.txt
+
+# Dữ liệu thật của kho (Excel): không commit
+input/
+scripts/kb/node_modules/
+
+# Tệp Excel có dữ liệu thật
+data/mau-kho-tri-thuc.xlsx

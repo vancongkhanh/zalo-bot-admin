@@ -1,0 +1,22 @@
+{
+  "name": "zalo-bot-kb-scripts",
+  "private": true,
+  "type": "module",
+  "description": "Script nạp, xuất, duyệt kho tri thức (bước B). Chạy trên máy, dùng Application Default Credentials.",
+  "scripts": {
+    "test": "vitest run",
+    "kb-import": "node kb-import.mjs",
+    "kb-export": "node kb-export.mjs",
+    "kb-approve": "node kb-approve.mjs",
+    "kb-hide": "node kb-hide.mjs",
+    "kb-list": "node kb-list.mjs",
+    "eval-import-testset": "node eval-import-testset.mjs"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0",
+    "firebase-admin": "^14.5.1"
+  },
+  "devDependencies": {
+    "vitest": "^5.1.0"
+  }
+}
