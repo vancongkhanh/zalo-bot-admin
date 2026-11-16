@@ -4,8 +4,8 @@ import { CONTENT_FIELDS, diffContent, isExampleSlug, validateRow } from "./valid
 
 export const IMPORT_APPROVER = "kb-import";
 
-/** Cột không tính khi xét dòng trống: do_dai_tra_loi là công thức trong tệp mẫu, ghi_chu không nạp. */
-const IGNORED_FOR_BLANK = new Set(["do_dai_tra_loi", "ghi_chu"]);
+/** Cột không tính khi xét dòng trống: do_dai_tra_loi là công thức trong tệp mẫu; ghi_chu, so_anh không nạp. */
+const IGNORED_FOR_BLANK = new Set(["do_dai_tra_loi", "ghi_chu", "so_anh"]);
 
 export function isBlankKhoRow(values) {
   return Object.entries(values).every(([k, v]) => IGNORED_FOR_BLANK.has(k) || !String(v ?? "").trim());

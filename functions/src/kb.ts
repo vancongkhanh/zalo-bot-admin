@@ -9,6 +9,13 @@ export interface KbLink {
   url: string;
 }
 
+/** Bước E: ảnh minh họa của mục (Firebase Storage, link tải có token). */
+export interface KbImage {
+  url: string;
+  /** Chú thích riêng; trống thì bot tự đặt "Bước i/n". */
+  caption: string;
+}
+
 /** Phần của `kb_items/{slug}` mà bot dùng. Chỉ mục `approved` được nạp. */
 export interface KbItem {
   slug: string;
@@ -16,7 +23,12 @@ export interface KbItem {
   questions: string[];
   answer: string;
   links: KbLink[];
+  /** Thứ tự trong mảng là thứ tự gửi. Thiếu = không có ảnh. */
+  images?: KbImage[];
 }
+
+export const MAX_ITEM_IMAGES = 10;
+export const MAX_CAPTION_CHARS = 200;
 
 /** Đọc một tài liệu Firestore thành KbItem; trả null nếu thiếu trường bắt buộc. */
 export function toKbItem(slug: string, data: Record<string, unknown>): KbItem | null {
@@ -35,23 +47,109 @@ export function toKbItem(slug: string, data: Record<string, unknown>): KbItem | 
         return [{ label, url }];
       })
     : [];
-  return { slug, title, questions, answer, links };
+  const images = Array.isArray(data.images)
+    ? data.images
+        .flatMap((im) => {
+          const o = im as Record<string, unknown> | null;
+          const url = typeof o?.url === "string" ? o.url.trim() : "";
+          if (!url.startsWith("https://")) return [];
+          const raw = typeof o?.caption === "string" ? o.caption.trim() : "";
+          const caption = Array.from(raw).slice(0, MAX_CAPTION_CHARS).join("");
+          return [{ url, caption }];
+        })
+        .slice(0, MAX_ITEM_IMAGES)
+    : [];
+  return { slug, title, questions, answer, links, images };
 }
 
 const charLen = (s: string) => Array.from(s).length;
 
+/** Ảnh không gửi thẳng mà đưa thành link trong tin chữ; `index` tính từ 1. */
+export interface ImageLink {
+  index: number;
+  url: string;
+}
+
+export interface AnswerText {
+  text: string;
+  droppedLinks: number;
+  /** Link ảnh bị bỏ vì tin quá dài (bước E). */
+  droppedImageLinks: number;
+}
+
 /**
- * Nội dung gửi: nguyên văn `answer`, rồi mỗi link một dòng `Nhãn: URL`.
- * Quá 2.000 ký tự thì bỏ bớt link từ cuối; `droppedLinks` > 0 để ghi cảnh báo.
+ * Nội dung gửi: nguyên văn `answer`, rồi mỗi link một dòng `Nhãn: URL`,
+ * rồi các ảnh thành link, mỗi ảnh một dòng `Ảnh i: URL` (bước E).
+ * Quá 2.000 ký tự thì bỏ link ảnh từ cuối trước, rồi link thường từ cuối.
  */
-export function buildAnswerText(item: KbItem, max = MAX_TEXT_LENGTH): { text: string; droppedLinks: number } {
+export function buildAnswerText(item: KbItem, max = MAX_TEXT_LENGTH, imageLinks: ImageLink[] = []): AnswerText {
   const lines = item.links.map((l) => `${l.label}: ${l.url}`);
-  for (let keep = lines.length; keep >= 0; keep--) {
-    const text = keep > 0 ? `${item.answer}\n\n${lines.slice(0, keep).join("\n")}` : item.answer;
-    if (charLen(text) <= max) return { text, droppedLinks: lines.length - keep };
+  const imageLines = imageLinks.map((l) => `Ảnh ${l.index}: ${l.url}`);
+  const compose = (keepLinks: number, keepImages: number) => {
+    const blocks = [item.answer];
+    if (keepLinks > 0) blocks.push(lines.slice(0, keepLinks).join("\n"));
+    if (keepImages > 0) blocks.push(imageLines.slice(0, keepImages).join("\n"));
+    return blocks.join("\n\n");
+  };
+  for (let keepImages = imageLines.length; keepImages >= 0; keepImages--) {
+    const text = compose(lines.length, keepImages);
+    if (charLen(text) <= max) {
+      return { text, droppedLinks: 0, droppedImageLinks: imageLines.length - keepImages };
+    }
+  }
+  for (let keep = lines.length - 1; keep >= 0; keep--) {
+    const text = compose(keep, 0);
+    if (charLen(text) <= max) {
+      return { text, droppedLinks: lines.length - keep, droppedImageLinks: imageLines.length };
+    }
   }
   // `answer` đã giới hạn 1.500 ký tự khi nạp; đây chỉ là chốt chặn.
-  return { text: Array.from(item.answer).slice(0, max).join(""), droppedLinks: lines.length };
+  return {
+    text: Array.from(item.answer).slice(0, max).join(""),
+    droppedLinks: lines.length,
+    droppedImageLinks: imageLines.length,
+  };
+}
+
+/** Ảnh sẽ gửi bằng `sendPhoto`, kèm chú thích đã chốt. */
+export interface PhotoToSend {
+  index: number;
+  url: string;
+  caption: string;
+}
+
+export interface ImagePlan {
+  photos: PhotoToSend[];
+  links: ImageLink[];
+  /** true nếu vì hạn mức tin mà mọi ảnh thành link (quyết định 7). */
+  quotaLimited: boolean;
+}
+
+/**
+ * Bước E, mục 3 bước 1-2: chọn ảnh gửi thẳng và ảnh thành link.
+ * `sentBefore`: số tin đã gửi trong tháng trước câu trả lời này.
+ * Chú thích tự đặt "Bước i/n" với n là tổng số ảnh của mục.
+ */
+export function planImages(
+  images: KbImage[],
+  maxPerAnswer: number,
+  sentBefore: number,
+  monthlyLimit: number,
+): ImagePlan {
+  const total = images.length;
+  let n = Math.max(0, Math.min(total, Math.floor(maxPerAnswer)));
+  let quotaLimited = false;
+  if (n > 0 && sentBefore + 1 + n > monthlyLimit) {
+    n = 0;
+    quotaLimited = true;
+  }
+  const photos = images.slice(0, n).map((im, i) => ({
+    index: i + 1,
+    url: im.url,
+    caption: im.caption || `Bước ${i + 1}/${total}`,
+  }));
+  const links = images.slice(n).map((im, i) => ({ index: n + i + 1, url: im.url }));
+  return { photos, links, quotaLimited };
 }
 
 /** Câu hỏi đã chuẩn hóa: chữ thường, bỏ dấu, bỏ ký tự thừa, gộp khoảng trắng. */

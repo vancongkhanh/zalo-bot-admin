@@ -1,0 +1,30 @@
+rules_version = '2';
+// Bước E: ảnh minh họa của mục kho tri thức, tải lên từ trang quản trị.
+// Bot gửi cho Zalo link tải có token (download URL); link đó không đi qua các quy tắc này.
+// Mọi đường dẫn không khớp bên dưới đều bị từ chối.
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Cùng điều kiện với firestore.rules: có tài liệu admins/{uid} (bạn tạo thủ công).
+    function isAdmin() {
+      return request.auth != null
+        && firestore.exists(/databases/(default)/documents/admins/$(request.auth.uid));
+    }
+
+    match /kb_images/{slug}/{file} {
+      // Trang cần đọc thông tin tệp để lấy download URL sau khi tải lên. Không cho liệt kê.
+      allow get: if isAdmin();
+
+      // Chỉ tạo tệp mới: không ghi đè, không xóa từ trình duyệt.
+      // Tải lên đúng đường dẫn đã có vẫn được tính là create, nên phải kiểm tra resource == null.
+      allow create: if isAdmin()
+        && resource == null
+        && slug.matches('^[a-z0-9]+(-[a-z0-9]+)*$') && slug.size() <= 80
+        && file.matches('^[A-Za-z0-9_-]{1,64}[.](jpg|png|webp)$')
+        && request.resource.size <= 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|webp)');
+
+      allow list, update, delete: if false;
+    }
+  }
+}

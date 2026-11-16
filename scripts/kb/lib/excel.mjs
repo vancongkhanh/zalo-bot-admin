@@ -4,8 +4,10 @@ import { charLength, formatLinks } from "./validate.mjs";
 
 export const KHO_COLUMNS = [
   "slug", "tieu_de", "nhom", "cach_hoi", "tra_loi", "do_dai_tra_loi",
-  "link", "tu_khoa", "nguon", "trang_thai", "ghi_chu",
+  "link", "tu_khoa", "nguon", "trang_thai", "ghi_chu", "so_anh",
 ];
+// so_anh (bước E): chỉ đọc, số ảnh đã tải lên từ trang quản trị. kb-import không đọc cột này
+// và không bao giờ đụng ảnh của mục.
 
 /** Giá trị ô exceljs → chuỗi (rich text, công thức, hyperlink, số, ngày). */
 export function cellText(v) {
@@ -60,6 +62,7 @@ export function itemToRow(item) {
     nguon: item.source ?? "",
     trang_thai: item.status ?? "draft",
     ghi_chu: "",
+    so_anh: Array.isArray(item.images) ? item.images.length : 0,
   };
 }
 
@@ -67,7 +70,7 @@ export function itemToRow(item) {
 export async function writeKho(path, items) {
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet("Kho");
-  const widths = { slug: 28, tieu_de: 32, nhom: 16, cach_hoi: 40, tra_loi: 60, do_dai_tra_loi: 10, link: 40, tu_khoa: 24, nguon: 24, trang_thai: 12, ghi_chu: 20 };
+  const widths = { slug: 28, tieu_de: 32, nhom: 16, cach_hoi: 40, tra_loi: 60, do_dai_tra_loi: 10, link: 40, tu_khoa: 24, nguon: 24, trang_thai: 12, ghi_chu: 20, so_anh: 8 };
   ws.columns = KHO_COLUMNS.map((key) => ({ header: key, key, width: widths[key] }));
   ws.getRow(1).font = { bold: true };
   for (const item of items) ws.addRow(itemToRow(item));

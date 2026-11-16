@@ -43,7 +43,7 @@ export interface ZaloClientOptions {
 
 export interface ZaloClient {
   sendMessage(chatId: string, text: string): Promise<ZaloResult>;
-  /** Viết sẵn, CHƯA dùng ở giai đoạn 1; chưa xác nhận hoạt động. */
+  /** Bước E: gửi ảnh từ link công khai. Đã thử 16/11/2026: Zalo trả message_type "CHAT_PHOTO". */
   sendPhoto(chatId: string, photoUrl: string, caption?: string): Promise<ZaloResult>;
   setWebhook(url: string, secretToken: string): Promise<ZaloResult>;
   deleteWebhook(): Promise<ZaloResult>;

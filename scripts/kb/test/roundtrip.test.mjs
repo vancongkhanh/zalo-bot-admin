@@ -108,7 +108,7 @@ describe("vòng nạp và xuất", () => {
       version: 1,
       hit_count: 0,
       steps: [],
-      image_urls: [],
+      images: [],
     });
     expect(kb.get("nop-ho-so")).toMatchObject({ status: "draft", approved_by: null });
     expect(kb.get("dang-nhap-quen-mat-khau")).not.toHaveProperty("ghi_chu");
@@ -159,6 +159,37 @@ describe("vòng nạp và xuất", () => {
     expect(p.unchanged).toHaveLength(2);
     expect(exported.find((r) => r.values.slug === "nop-ho-so").values.trang_thai).toBe("hidden");
     expect(Number(exported.find((r) => r.values.slug === "dang-nhap-quen-mat-khau").values.do_dai_tra_loi)).toBe(46);
+  });
+});
+
+describe("bước E: ảnh", () => {
+  it("E7: nạp lại Excel (kể cả --ghi-de-approved) không làm mất ảnh; xuất có cột so_anh", async () => {
+    const f = join(dir, "e7.xlsx");
+    await makeWorkbook(f, SAMPLE);
+    const { rows } = await readSheet(f, "Kho");
+    await applyPlan(db, planImport(rows, await loadKb(db)));
+    const images = [{ url: "https://x.test/1.jpg", path: "kb_images/dang-nhap-quen-mat-khau/1.jpg", caption: "" }];
+    db.update(`${KB}/dang-nhap-quen-mat-khau`, { images });
+
+    const edited = SAMPLE.map((r) => (r[0] === "dang-nhap-quen-mat-khau" ? r.map((c, i) => (i === 4 ? "Nội dung mới." : c)) : r));
+    const f2 = join(dir, "e7-edit.xlsx");
+    await makeWorkbook(f2, edited);
+    const { rows: rows2 } = await readSheet(f2, "Kho");
+    await applyPlan(db, planImport(rows2, await loadKb(db), { overwriteApproved: true }));
+    const after = (await loadKb(db)).get("dang-nhap-quen-mat-khau");
+    expect(after.answer).toBe("Nội dung mới.");
+    expect(after.images).toEqual(images);
+
+    const out = join(dir, "e7-export.xlsx");
+    const kb = await loadKb(db);
+    await writeKho(out, [...kb.entries()].map(([slug, d]) => ({ slug, ...d })));
+    const { rows: exported } = await readSheet(out, "Kho");
+    expect(exported.find((r) => r.values.slug === "dang-nhap-quen-mat-khau").values.so_anh).toBe("1");
+    expect(exported.find((r) => r.values.slug === "nop-ho-so").values.so_anh).toBe("0");
+    // Xuất rồi nạp lại: cột so_anh không gây thay đổi.
+    const p = planImport(exported, kb);
+    expect(p.updates).toEqual([]);
+    expect(p.creates).toEqual([]);
   });
 });
 

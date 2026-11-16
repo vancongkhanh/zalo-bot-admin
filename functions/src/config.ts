@@ -20,6 +20,9 @@ export interface BotConfig {
   monthlyAiCallLimit: number;
   handoffMessage: string;
   aiTimeoutMs: number;
+  // Bước E
+  /** Số ảnh tối đa gửi kèm một câu trả lời (0-10); ảnh còn lại thành link. */
+  maxImagesPerAnswer: number;
 }
 
 export const DEFAULT_CONFIG: BotConfig = {
@@ -34,12 +37,15 @@ export const DEFAULT_CONFIG: BotConfig = {
   monthlyAiCallLimit: 6000,
   handoffMessage: "Câu hỏi của anh/chị đã được ghi nhận, chuyên viên sẽ hỗ trợ sớm.",
   aiTimeoutMs: 15000,
+  maxImagesPerAnswer: 4,
 };
 
 /** Giới hạn an toàn cho các trường bước C (hàm có timeout 60 giây). */
 export const AI_TIMEOUT_RANGE = { min: 1000, max: 50000 } as const;
 export const MODEL_PATTERN = /^claude-[a-z0-9-]{1,60}$/;
 export const MAX_HANDOFF_CHARS = 1000;
+/** Bước E: số ảnh gửi mỗi câu trả lời, và số ảnh tối đa của một mục. */
+export const MAX_IMAGES_PER_ITEM = 10;
 
 /** Tỷ lệ hạn mức để ghi cảnh báo. */
 export const QUOTA_WARNING_RATIO = 0.8;
@@ -134,6 +140,18 @@ export function parseConfig(raw: Record<string, unknown> | undefined): {
     config.aiTimeoutMs = Math.round(timeout);
   } else if (timeout !== undefined) {
     warnings.push(`ai_timeout_ms phải từ ${AI_TIMEOUT_RANGE.min} đến ${AI_TIMEOUT_RANGE.max}`);
+  }
+
+  const maxImages = raw.max_images_per_answer;
+  if (
+    typeof maxImages === "number" &&
+    Number.isInteger(maxImages) &&
+    maxImages >= 0 &&
+    maxImages <= MAX_IMAGES_PER_ITEM
+  ) {
+    config.maxImagesPerAnswer = maxImages;
+  } else if (maxImages !== undefined) {
+    warnings.push(`max_images_per_answer phải là số nguyên từ 0 đến ${MAX_IMAGES_PER_ITEM}`);
   }
 
   return { config, warnings };

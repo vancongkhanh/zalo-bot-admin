@@ -4,7 +4,8 @@ import { logic } from "./load-logic.mjs";
 const {
   validateItemForm, buildItemWrite, needsLiveConfirm, mergeQuestions, suggestSlug, itemToForm,
   settingsFromConfig, validateSettings, summarizeStats, lastNDays, monthKey, filterItems, estimateCost,
-  parseLinks, approveProblems, BOT_DEFAULTS,
+  parseLinks, approveProblems, BOT_DEFAULTS, validateImages, scaleSize, imageFileProblem, imageSendNote,
+  diffContent,
 } = logic;
 
 const form = (over = {}) => ({
@@ -33,6 +34,7 @@ describe("validateItemForm", () => {
       keywords: ["ký số", "usb"],
       source: "HDSD trang 3",
       status: "draft",
+      images: [],
     });
   });
 
@@ -75,7 +77,7 @@ describe("buildItemWrite", () => {
   it("tạo mới: đủ trường như script kb-import, bộ đếm về 0", () => {
     const d = buildItemWrite(null, item, "a@x.vn", "NOW");
     expect(d).toMatchObject({
-      version: 1, steps: [], image_urls: [], hit_count: 0, last_hit_at: null,
+      version: 1, steps: [], images: [], hit_count: 0, last_hit_at: null,
       created_at: "NOW", updated_at: "NOW", updated_by: "a@x.vn", approved_at: null, approved_by: null,
     });
     const a = buildItemWrite(null, { ...item, status: "approved" }, "a@x.vn", "NOW");
@@ -165,6 +167,7 @@ describe("Cài đặt", () => {
       reply_enabled: true,
       confidence_threshold: "0.7",
       handoff_message: BOT_DEFAULTS.handoff_message,
+      max_images_per_answer: "4",
       chats: [],
     });
   });
@@ -182,7 +185,7 @@ describe("Cài đặt", () => {
     expect(errors).toEqual([]);
     expect(data).toEqual({
       ai_enabled: true, reply_enabled: true, confidence_threshold: 0.8, handoff_message: "Chờ nhé",
-      allowed_chat_ids: ["g1", "g2"], chat_labels: { g1: "Nhóm 1" },
+      max_images_per_answer: 4, allowed_chat_ids: ["g1", "g2"], chat_labels: { g1: "Nhóm 1" },
     });
   });
 
@@ -194,6 +197,10 @@ describe("Cài đặt", () => {
     [{ chats: [{ id: "g 1", label: "" }] }, "khoảng trắng"],
     [{ chats: [{ id: "g1", label: "" }, { id: "g1", label: "" }] }, "trùng"],
     [{ chats: [{ id: "", label: "Nhóm" }] }, "chưa có mã"],
+    [{ max_images_per_answer: "11" }, "Số ảnh"],
+    [{ max_images_per_answer: "-1" }, "Số ảnh"],
+    [{ max_images_per_answer: "2.5" }, "Số ảnh"],
+    [{ max_images_per_answer: "" }, "Số ảnh"],
   ])("lỗi: %o", (over, text) => {
     const base = { ai_enabled: false, reply_enabled: true, confidence_threshold: "0.7", handoff_message: "ok", chats: [] };
     const { data, errors } = validateSettings({ ...base, ...over });
@@ -228,5 +235,71 @@ describe("Thống kê", () => {
   it("chi phí theo bảng giá", () => {
     expect(estimateCost("claude-haiku-5-5", 1_000_000, 100_000)).toBeCloseTo(0.15);
     expect(estimateCost("khac", 1, 1)).toBeNull();
+  });
+});
+
+describe("Ảnh (bước E)", () => {
+  const img = (i, over = {}) => ({
+    url: `https://firebasestorage.googleapis.com/v0/b/x/o/kb_images%2Fky-so%2F${i}.jpg?alt=media&token=t`,
+    path: `kb_images/ky-so/${i}.jpg`, caption: "", width: 1600, height: 900, bytes: 200000, ...over,
+  });
+
+  it("validateItemForm nhận ảnh đúng thư mục của mục, gọn chú thích", () => {
+    const r = validateItemForm(form({ images: [img(1, { caption: "  Bước   đầu " }), img(2)] }));
+    expect(r.errors).toEqual([]);
+    expect(r.item.images).toEqual([img(1, { caption: "Bước đầu" }), img(2)]);
+  });
+
+  it("chặn quá 10 ảnh, chú thích quá 200 ký tự, ảnh của mục khác hoặc link không https", () => {
+    const many = Array.from({ length: 11 }, (_, i) => img(i));
+    expect(validateItemForm(form({ images: many })).errors.join()).toContain("Tối đa 10 ảnh");
+    expect(validateItemForm(form({ images: [img(1, { caption: "c".repeat(201) })] })).errors.join()).toContain("200");
+    expect(validateItemForm(form({ images: [img(1, { path: "kb_images/muc-khac/1.jpg" })] })).item).toBeNull();
+    expect(validateItemForm(form({ images: [img(1, { url: "http://x/1.jpg" })] })).item).toBeNull();
+    expect(validateImages(undefined, "ky-so")).toEqual({ images: [], errors: [] });
+    const local = img(1, { url: "http://127.0.0.1:9199/v0/b/demo/o/x" });
+    expect(validateItemForm(form({ images: [local] })).item).toBeNull();
+    expect(validateItemForm(form({ images: [local] }), { localImageUrls: true }).item).not.toBeNull();
+  });
+
+  it("đổi, đảo thứ tự hoặc gỡ ảnh là đổi nội dung: version tăng, mục đã duyệt cần xác nhận (E9)", () => {
+    const old = { ...validateItemForm(form({ status: "approved", images: [img(1), img(2)] })).item, version: 3 };
+    const swapped = { ...old, images: [img(2), img(1)] };
+    expect(buildItemWrite(old, swapped, "a@x.vn", "NOW")).toMatchObject({ images: [img(2), img(1)], version: 4 });
+    expect(needsLiveConfirm(old, swapped)).toBe(true);
+    expect(needsLiveConfirm(old, { ...old, images: [img(1)] })).toBe(true);
+    expect(buildItemWrite(old, { ...old, images: [img(1), img(2, { caption: "Mới" })] }, "a@x.vn", "NOW").version).toBe(4);
+  });
+
+  it("mục cũ chưa có trường images coi như không có ảnh (không tính là thay đổi)", () => {
+    const old = { ...validateItemForm(form()).item, version: 2 };
+    delete old.images;
+    expect(diffContent(old, { ...old, images: [] })).toEqual([]);
+    expect(buildItemWrite(old, { ...old, images: [] }, "a@x.vn", "NOW")).toBeNull();
+    expect(itemToForm("ky-so", old).images).toEqual([]);
+  });
+
+  it("scaleSize: cạnh dài tối đa 1600, không phóng to", () => {
+    expect(scaleSize(4000, 3000)).toEqual({ width: 1600, height: 1200 });
+    expect(scaleSize(1080, 2400)).toEqual({ width: 720, height: 1600 });
+    expect(scaleSize(800, 600)).toEqual({ width: 800, height: 600 });
+  });
+
+  it("imageFileProblem: chặn tệp không phải ảnh và ảnh gốc > 10 MB", () => {
+    expect(imageFileProblem({ type: "image/png", size: 5 * 1048576 })).toBeNull();
+    expect(imageFileProblem({ type: "application/pdf", size: 10 })).toContain("Không phải");
+    expect(imageFileProblem({ type: "image/jpeg", size: 11 * 1048576 })).toContain("10 MB");
+  });
+
+  it("imageSendNote giải thích ảnh nào gửi, ảnh nào thành link", () => {
+    expect(imageSendNote(3, 4)).toContain("3 ảnh");
+    expect(imageSendNote(6, 4)).toBe("Bot gửi 4 ảnh đầu, 2 ảnh sau thành link trong tin chữ.");
+    expect(imageSendNote(2, 0)).toContain("tắt gửi ảnh");
+    expect(imageSendNote(0, 4)).toBe("");
+  });
+
+  it("Cài đặt đọc max_images_per_answer; giá trị sai dùng mặc định", () => {
+    expect(settingsFromConfig({ max_images_per_answer: 0 }).max_images_per_answer).toBe("0");
+    expect(settingsFromConfig({ max_images_per_answer: 12 }).max_images_per_answer).toBe("4");
   });
 });

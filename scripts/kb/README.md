@@ -24,7 +24,7 @@ Tệp Excel dữ liệu thật đặt trong `input/` (thư mục này không đ�
 | `node kb-import.mjs ../../input/kho.xlsx --thu` | Chạy thử: in kế hoạch (mới, cập nhật, không đổi, xung đột, từ chối, cảnh báo), **không ghi** |
 | `node kb-import.mjs ../../input/kho.xlsx` | Nạp thật |
 | `node kb-import.mjs ../../input/kho.xlsx --ghi-de-approved` | Cho phép ghi đè mục đang `approved` (version tăng) |
-| `node kb-export.mjs ../../input/kho-xuat.xlsx` | Xuất kho ra Excel cùng cột (thêm `--ghi-de-tep` nếu tệp đã có) |
+| `node kb-export.mjs ../../input/kho-xuat.xlsx` | Xuất kho ra Excel cùng cột, thêm cột chỉ đọc `so_anh` ở cuối (thêm `--ghi-de-tep` nếu tệp đã có) |
 | `node kb-approve.mjs slug-1 slug-2` | Duyệt (cần có trả lời, ≥ 2 cách hỏi, có nguồn) |
 | `node kb-hide.mjs slug-1` | Ẩn: bot không dùng, mục vẫn còn |
 | `node kb-list.mjs [--trang-thai=approved]` | Liệt kê |
@@ -41,6 +41,7 @@ Tệp Excel dữ liệu thật đặt trong `input/` (thư mục này không đ�
 - Mục mới: `version` 1. Nội dung đổi: `version` tăng; chỉ đổi trạng thái thì không.
 - Mục đang `approved`: không bị ghi đè hay hạ trạng thái nếu không có `--ghi-de-approved`; script báo trường khác.
 - Mục có trong kho nhưng không còn trong tệp: giữ nguyên, chỉ liệt kê. Script **không bao giờ xóa** mục.
+- **Ảnh (bước E):** chỉ tải lên từ trang quản trị. `kb-import` không đọc cột `so_anh` và không bao giờ ghi `images`, kể cả với `--ghi-de-approved`: nạp lại Excel không làm mất ảnh. Mục mới tạo từ Excel có `images: []`.
 - `approved_by`: `kb-import` (duyệt qua Excel), `kb-approve`, hoặc email người duyệt trên trang quản trị.
 - **Cẩn thận với `--ghi-de-approved`:** cột `trang_thai` trong Excel là nguồn chuẩn. Dòng để trống hoặc `draft` sẽ đưa mục đang `approved` về `draft` (bot ngừng dùng). Ghi `approved` cho các mục muốn giữ, và xem cột trạng thái ở bước `--thu` (dạng `approved → draft`) trước khi nạp thật.
 

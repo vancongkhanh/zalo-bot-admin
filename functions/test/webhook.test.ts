@@ -17,7 +17,7 @@ class FakeStore implements Store {
   config: BotConfig = { ...DEFAULT_CONFIG, allowedChatIds: [GROUP] };
   events = new Map<string, string>();
   conversations = new Map<string, ConversationRecord>();
-  usage = new Map<string, { messages_sent: number; send_errors: number; warned: boolean }>();
+  usage = new Map<string, { messages_sent: number; send_errors: number; warned: boolean; photos_sent?: number; photo_errors?: number }>();
   calls: string[] = [];
   items: KbItem[] = [];
   aiCalls = 0;
@@ -55,6 +55,13 @@ class FakeStore implements Store {
   async recordSendError(month: string) {
     this.calls.push("recordSendError");
     this.u(month).send_errors++;
+  }
+  async recordPhotoSend(month: string, ok: boolean) {
+    this.calls.push("recordPhotoSend");
+    const u = this.u(month);
+    u.messages_sent++;
+    if (ok) u.photos_sent = (u.photos_sent ?? 0) + 1;
+    else u.photo_errors = (u.photo_errors ?? 0) + 1;
   }
   async markQuotaWarning(month: string) {
     const u = this.u(month);
@@ -102,8 +109,12 @@ function makeLogger() {
 
 function makeClient(result: ZaloResult = { ok: true, result: {} }) {
   const sendMessage = vi.fn(async (_chatId: string, _text: string) => result);
-  const client = { sendMessage } as unknown as ZaloClient;
-  return { client, sendMessage };
+  const sendPhoto = vi.fn(async (_chatId: string, _url: string, _caption?: string): Promise<ZaloResult> => ({
+    ok: true,
+    result: { message_type: "CHAT_PHOTO" },
+  }));
+  const client = { sendMessage, sendPhoto } as unknown as ZaloClient;
+  return { client, sendMessage, sendPhoto };
 }
 
 function textEvent(overrides: Partial<{ id: string; text: string; chatId: string; chatType: string; event: string }> = {}) {
@@ -538,5 +549,126 @@ describe("bước C: ai_enabled = true", () => {
     setupAi(async () => aiReply('{"slug":null,"confidence":0.9}'), { logRawBody: false });
     await ask("@Bot TTHC Đảng câu hỏi bí mật số 123");
     expect(JSON.stringify(log.lines)).not.toContain("bí mật");
+  });
+});
+
+// ---------- Bước E: ảnh ----------
+
+const img = (i: number, caption = "") => ({ url: `https://firebasestorage.example/kb_images/ky-so/${i}.jpg`, caption });
+
+function setupImages(count: number, cfg: Partial<BotConfig> = {}, captions: Record<number, string> = {}) {
+  setupAi(async () => aiReply('{"slug":"ky-so","confidence":0.95}'), cfg);
+  store.items = [{ ...KB[0], images: Array.from({ length: count }, (_, i) => img(i + 1, captions[i + 1] ?? "")) }];
+}
+
+describe("bước E: gửi ảnh kèm câu trả lời", () => {
+  it("3 ảnh: tin chữ trước, rồi 3 ảnh đúng thứ tự, chú thích Bước i/3 hoặc chú thích riêng (E1)", async () => {
+    setupImages(3, {}, { 2: "Chọn chứng thư" });
+    const order: string[] = [];
+    zalo.sendMessage.mockImplementation(async () => (order.push("text"), { ok: true, result: {} }));
+    zalo.sendPhoto.mockImplementation(async (_c, url) => (order.push(url), { ok: true, result: {} }));
+    await ask("@Bot TTHC Đảng ký số");
+    expect(order).toEqual(["text", img(1).url, img(2).url, img(3).url]);
+    expect(zalo.sendPhoto.mock.calls.map((c) => [c[0], c[2]])).toEqual([
+      [GROUP, "Bước 1/3"],
+      [GROUP, "Chọn chứng thư"],
+      [GROUP, "Bước 3/3"],
+    ]);
+    expect(zalo.sendMessage).toHaveBeenCalledWith(GROUP, "Vào mục Ký số, chọn chứng thư.\n\nVideo: https://youtu.be/fake");
+    expect(store.conversations.get("FAKEMSG00000000000001")).toMatchObject({
+      outcome: "answered",
+      images_sent: 3,
+      image_errors: 0,
+      images_as_links: 0,
+    });
+    expect(store.events.get("FAKEMSG00000000000001")).toBe("done");
+  });
+
+  it("6 ảnh, tối đa 4: gửi 4 ảnh, ảnh 5 và 6 thành link cuối tin chữ (E2)", async () => {
+    setupImages(6, { maxImagesPerAnswer: 4 });
+    await ask("@Bot TTHC Đảng ký số");
+    expect(zalo.sendPhoto).toHaveBeenCalledTimes(4);
+    expect(zalo.sendPhoto.mock.calls[3][2]).toBe("Bước 4/6");
+    expect(zalo.sendMessage).toHaveBeenCalledWith(
+      GROUP,
+      `Vào mục Ký số, chọn chứng thư.\n\nVideo: https://youtu.be/fake\n\nẢnh 5: ${img(5).url}\nẢnh 6: ${img(6).url}`,
+    );
+    expect(store.conversations.get("FAKEMSG00000000000001")).toMatchObject({ images_sent: 4, images_as_links: 2 });
+  });
+
+  it("messages_sent tăng 1 + số ảnh; photos_sent khớp; stats_daily có photos_sent (E3)", async () => {
+    setupImages(3);
+    await ask("@Bot TTHC Đảng ký số");
+    expect(store.usage.get("2026-11")).toMatchObject({ messages_sent: 4, photos_sent: 3 });
+    expect(store.daily[0].stat).toEqual({ outcome: "answered", aiError: false, slug: "ky-so", photosSent: 3 });
+  });
+
+  it("hạn mức không đủ cho chữ + ảnh: chỉ gửi tin chữ, mọi ảnh thành link, có cảnh báo (E4)", async () => {
+    setupImages(3, { monthlyMessageLimit: 10 });
+    store.usage.set("2026-11", { messages_sent: 7, send_errors: 0, warned: true });
+    await ask("@Bot TTHC Đảng ký số");
+    expect(zalo.sendPhoto).not.toHaveBeenCalled();
+    const text = zalo.sendMessage.mock.calls[0][1];
+    expect(text).toContain(`Ảnh 1: ${img(1).url}`);
+    expect(text).toContain(`Ảnh 3: ${img(3).url}`);
+    expect(store.usage.get("2026-11")?.messages_sent).toBe(8);
+    expect(log.lines.some((l) => l.level === "warn" && l.message.includes("ảnh chuyển thành link"))).toBe(true);
+    expect(store.conversations.get("FAKEMSG00000000000001")).toMatchObject({ images_sent: 0, images_as_links: 3 });
+  });
+
+  it("vừa đủ hạn mức (đã gửi + 1 + n = hạn mức) → vẫn gửi ảnh", async () => {
+    setupImages(3, { monthlyMessageLimit: 10 });
+    store.usage.set("2026-11", { messages_sent: 6, send_errors: 0, warned: true });
+    await ask("@Bot TTHC Đảng ký số");
+    expect(zalo.sendPhoto).toHaveBeenCalledTimes(3);
+    expect(store.usage.get("2026-11")?.messages_sent).toBe(10);
+  });
+
+  it("một ảnh lỗi: ghi lỗi, ảnh sau vẫn gửi, sự kiện vẫn done (E5)", async () => {
+    setupImages(3);
+    zalo.sendPhoto
+      .mockResolvedValueOnce({ ok: true, result: {} })
+      .mockResolvedValueOnce({ ok: false, error: { code: "api_error", description: "sendPhoto: bad url" } })
+      .mockResolvedValueOnce({ ok: true, result: {} });
+    await ask("@Bot TTHC Đảng ký số");
+    expect(zalo.sendPhoto).toHaveBeenCalledTimes(3);
+    expect(store.usage.get("2026-11")).toMatchObject({ messages_sent: 4, photos_sent: 2, photo_errors: 1 });
+    expect(store.conversations.get("FAKEMSG00000000000001")).toMatchObject({ images_sent: 2, image_errors: 1 });
+    expect(log.lines.some((l) => l.level === "error" && l.data?.image_index === 2)).toBe(true);
+    expect(store.events.get("FAKEMSG00000000000001")).toBe("done");
+    expect(store.hits).toEqual(["ky-so"]);
+  });
+
+  it("tin chữ lỗi → không gửi ảnh", async () => {
+    setupImages(2);
+    zalo.sendMessage.mockResolvedValueOnce({ ok: false, error: { code: "api_error", description: "lỗi" } });
+    await ask("@Bot TTHC Đảng ký số");
+    expect(zalo.sendPhoto).not.toHaveBeenCalled();
+    expect(store.events.get("FAKEMSG00000000000001")).toBe("failed");
+  });
+
+  it("max_images_per_answer = 0 → không gửi ảnh, ảnh thành link, không cảnh báo hạn mức", async () => {
+    setupImages(2, { maxImagesPerAnswer: 0 });
+    await ask("@Bot TTHC Đảng ký số");
+    expect(zalo.sendPhoto).not.toHaveBeenCalled();
+    expect(zalo.sendMessage.mock.calls[0][1]).toContain(`Ảnh 2: ${img(2).url}`);
+    expect(log.lines.some((l) => l.message.includes("ảnh chuyển thành link"))).toBe(false);
+  });
+
+  it("chuyển ca → không gửi ảnh; mục không có ảnh → conversations không có trường ảnh", async () => {
+    setupAi(async () => aiReply('{"slug":null,"confidence":0.9}'));
+    await ask("@Bot TTHC Đảng nộp thuế");
+    expect(zalo.sendPhoto).not.toHaveBeenCalled();
+    setupAi(async () => aiReply('{"slug":"ky-so","confidence":0.95}'));
+    await ask("@Bot TTHC Đảng ký số");
+    expect(zalo.sendPhoto).not.toHaveBeenCalled();
+    expect(store.conversations.get("FAKEMSG00000000000001")).not.toHaveProperty("images_sent");
+  });
+
+  it("gửi lại cùng message_id → không gửi ảnh lần hai", async () => {
+    setupImages(2);
+    await ask("@Bot TTHC Đảng ký số");
+    await ask("@Bot TTHC Đảng ký số");
+    expect(zalo.sendPhoto).toHaveBeenCalledTimes(2);
   });
 });

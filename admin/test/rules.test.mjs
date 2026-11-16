@@ -1,4 +1,4 @@
-// Kiểm thử firestore.rules trên Firestore Emulator (dự án demo, không đụng dữ liệu thật).
+// Kiểm thử firestore.rules và storage.rules trên emulator (dự án demo, không đụng dữ liệu thật).
 // Chạy: cd admin && npm run test:rules   (cần Java 21 và firebase-tools)
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -9,6 +9,7 @@ import {
   collection, deleteDoc, doc, getDoc, getDocs, limit, orderBy, query, serverTimestamp, setDoc, updateDoc, where,
   writeBatch, Timestamp,
 } from "firebase/firestore";
+import { deleteObject, getDownloadURL, listAll, ref as sref, uploadBytes } from "firebase/storage";
 import { logic } from "./load-logic.mjs";
 
 const { buildItemWrite, validateItemForm, validateSettings, settingsFromConfig } = logic;
@@ -17,6 +18,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const env = await initializeTestEnvironment({
   projectId: "demo-zalo-bot",
   firestore: { rules: readFileSync(join(ROOT, "firestore.rules"), "utf8"), host: "127.0.0.1", port: 8080 },
+  storage: { rules: readFileSync(join(ROOT, "storage.rules"), "utf8"), host: "127.0.0.1", port: 9199 },
 });
 afterAll(() => env.cleanup());
 
@@ -53,6 +55,7 @@ const itemOf = (over) => validateItemForm(form(over)).item;
 
 beforeEach(async () => {
   await env.clearFirestore();
+  await env.clearStorage();
   await env.withSecurityRulesDisabled(async (ctx) => {
     const db = ctx.firestore();
     await setDoc(doc(db, "admins", ADMIN.uid), { email: ADMIN.email });
@@ -251,5 +254,108 @@ describe("D7: config/main chỉ ghi được các trường của màn Cài đ�
   it("không tạo tài liệu config khác, không xóa config/main", async () => {
     await assertFails(setDoc(doc(admin(), "config", "khac"), { ai_enabled: true }));
     await assertFails(deleteDoc(ref()));
+  });
+});
+
+// ---------- Bước E: ảnh ----------
+
+const IMG = (i, over = {}) => ({
+  url: `https://firebasestorage.googleapis.com/v0/b/demo/o/kb_images%2Fky-so%2F${i}.jpg?alt=media&token=t`,
+  path: `kb_images/ky-so/${i}.jpg`, caption: "", width: 1600, height: 900, bytes: 200000, ...over,
+});
+
+describe("bước E: kb_items.images", () => {
+  const upd = (data) => updateDoc(doc(admin(), "kb_items", "ky-so"), data);
+  const cur = { ...ITEM };
+
+  it("tạo mục có ảnh và sửa, đảo thứ tự, gỡ ảnh mục đã duyệt (version tăng) được chấp nhận", async () => {
+    const item = validateItemForm(form({ slug: "co-anh", images: [] })).item;
+    await assertSucceeds(setDoc(doc(admin(), "kb_items", "co-anh"),
+      buildItemWrite(null, { ...item, images: [IMG(1)] }, ADMIN.email, serverTimestamp())));
+    await assertSucceeds(upd(buildItemWrite(cur, { ...cur, images: [IMG(1), IMG(2)] }, ADMIN.email, serverTimestamp())));
+  });
+
+  it("10 ảnh được, 11 ảnh hoặc images không phải mảng bị từ chối", async () => {
+    const base = buildItemWrite(cur, { ...cur, answer: "Mới" }, ADMIN.email, serverTimestamp());
+    await assertSucceeds(upd({ ...base, images: Array.from({ length: 10 }, (_, i) => IMG(i)) }));
+  });
+
+  it.each([
+    ["11 ảnh", { images: Array.from({ length: 11 }, (_, i) => IMG(i)) }],
+    ["images là chuỗi", { images: "x" }],
+    ["sửa image_urls cũ", { image_urls: ["https://x/1.jpg"] }],
+  ])("từ chối: %s", async (_name, over) => {
+    const base = buildItemWrite(cur, { ...cur, answer: "Mới" }, ADMIN.email, serverTimestamp());
+    await assertFails(upd({ ...base, ...over }));
+  });
+
+  it("tạo mục mà image_urls không rỗng bị từ chối", async () => {
+    const base = buildItemWrite(null, itemOf({ slug: "c2" }), ADMIN.email, serverTimestamp());
+    await assertFails(setDoc(doc(admin(), "kb_items", "c2"), { ...base, image_urls: ["https://x/1.jpg"] }));
+  });
+});
+
+describe("bước E: config/main.max_images_per_answer", () => {
+  const ref = () => doc(admin(), "config", "main");
+  const stamp = { updated_at: serverTimestamp(), updated_by: ADMIN.email };
+
+  it("màn Cài đặt ghi 0 và 10 được", async () => {
+    const f = settingsFromConfig({ allowed_chat_ids: ["g1"] });
+    for (const v of ["0", "10"]) {
+      const { data } = validateSettings({ ...f, max_images_per_answer: v });
+      await assertSucceeds(updateDoc(ref(), { ...data, ...stamp }));
+    }
+  });
+
+  it.each([[11], [-1], [2.5], ["4"]])("từ chối %o", async (v) => {
+    await assertFails(updateDoc(ref(), { max_images_per_answer: v, ...stamp }));
+  });
+});
+
+describe("E6: Storage kb_images", () => {
+  const st = (ctx) => ctx.storage();
+  const adminSt = () => st(env.authenticatedContext(ADMIN.uid, { email: ADMIN.email }));
+  const outsiderSt = () => st(env.authenticatedContext("nguoi-ngoai", { email: "x@example.com" }));
+  const anonSt = () => st(env.unauthenticatedContext());
+  const bytes = (n) => new Uint8Array(n);
+  const jpeg = { contentType: "image/jpeg" };
+
+  it("admin tải ảnh JPEG lên thư mục của mục và lấy được download URL", async () => {
+    const r = sref(adminSt(), "kb_images/ky-so/abc123.jpg");
+    await assertSucceeds(uploadBytes(r, bytes(1000), jpeg));
+    const url = await getDownloadURL(r);
+    expect(url).toContain("token=");
+  });
+
+  it("PNG, WEBP và đúng 5 MB được nhận", async () => {
+    await assertSucceeds(uploadBytes(sref(adminSt(), "kb_images/ky-so/a.png"), bytes(10), { contentType: "image/png" }));
+    await assertSucceeds(uploadBytes(sref(adminSt(), "kb_images/ky-so/b.webp"), bytes(10), { contentType: "image/webp" }));
+    await assertSucceeds(uploadBytes(sref(adminSt(), "kb_images/ky-so/c.jpg"), bytes(5 * 1024 * 1024), jpeg));
+  });
+
+  it("người ngoài admins và người chưa đăng nhập không tải lên, không đọc được", async () => {
+    await assertFails(uploadBytes(sref(outsiderSt(), "kb_images/ky-so/x.jpg"), bytes(10), jpeg));
+    await assertFails(uploadBytes(sref(anonSt(), "kb_images/ky-so/x.jpg"), bytes(10), jpeg));
+    await assertSucceeds(uploadBytes(sref(adminSt(), "kb_images/ky-so/y.jpg"), bytes(10), jpeg));
+    await assertFails(getDownloadURL(sref(outsiderSt(), "kb_images/ky-so/y.jpg")));
+  });
+
+  it.each([
+    ["tệp không phải ảnh", "kb_images/ky-so/a.jpg", 10, { contentType: "application/pdf" }],
+    ["ảnh GIF", "kb_images/ky-so/a.jpg", 10, { contentType: "image/gif" }],
+    ["quá 5 MB", "kb_images/ky-so/a.jpg", 5 * 1024 * 1024 + 1, jpeg],
+    ["ngoài thư mục kb_images", "khac/a.jpg", 10, jpeg],
+    ["slug sai định dạng", "kb_images/Ky So/a.jpg", 10, jpeg],
+    ["tên tệp lạ", "kb_images/ky-so/a.exe", 10, jpeg],
+  ])("từ chối: %s", async (_name, path, n, meta) => {
+    await assertFails(uploadBytes(sref(adminSt(), path), bytes(n), meta));
+  });
+
+  it("không ghi đè, không xóa, không liệt kê từ trình duyệt", async () => {
+    const r = sref(adminSt(), "kb_images/ky-so/z.jpg");
+    await assertSucceeds(uploadBytes(r, bytes(10), jpeg));
+    await assertFails(uploadBytes(sref(adminSt(), "kb_images/ky-so/z.jpg"), bytes(20), jpeg));
+    await assertFails(deleteObject(sref(adminSt(), "kb_images/ky-so/z.jpg")));
+    await assertFails(listAll(sref(adminSt(), "kb_images/ky-so")));
   });
 });

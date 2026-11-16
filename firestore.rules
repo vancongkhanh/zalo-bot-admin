@@ -42,7 +42,9 @@ service cloud.firestore {
         && d.keywords is list && d.keywords.size() <= 50
         && isStr(d.source, 0, 500)
         && d.status in ['draft', 'approved', 'hidden']
-        && d.version is int;
+        && d.version is int
+        // Bước E: ảnh tải lên Storage từ trang quản trị (tối đa 10).
+        && (!('images' in d) || (d.images is list && d.images.size() <= 10));
     }
 
     // Cùng điều kiện duyệt với script kb-approve.
@@ -52,7 +54,7 @@ service cloud.firestore {
 
     function kbKeys() {
       return ['title', 'topic', 'questions', 'answer', 'links', 'keywords', 'source', 'status',
-              'steps', 'image_urls', 'hit_count', 'last_hit_at', 'version',
+              'steps', 'image_urls', 'images', 'hit_count', 'last_hit_at', 'version',
               'created_at', 'updated_at', 'approved_at', 'approved_by', 'updated_by'];
     }
 
@@ -67,7 +69,8 @@ service cloud.firestore {
         && request.resource.data.hit_count == 0
         && request.resource.data.last_hit_at == null
         && request.resource.data.steps == []
-        && request.resource.data.image_urls == []
+        // image_urls (cũ) không còn ghi; nếu có thì phải rỗng.
+        && (!('image_urls' in request.resource.data) || request.resource.data.image_urls == [])
         && request.resource.data.created_at == request.time
         && request.resource.data.updated_at == request.time
         && request.resource.data.updated_by == adminEmail()
@@ -77,7 +80,8 @@ service cloud.firestore {
               && request.resource.data.approved_at == request.time
               && request.resource.data.approved_by == adminEmail());
 
-      // Không đụng bộ đếm của bot (hit_count, last_hit_at), ngày tạo, phần chừa cho PDF.
+      // Không đụng bộ đếm của bot (hit_count, last_hit_at), ngày tạo, phần chừa cho PDF,
+      // và trường cũ image_urls (bước E dùng images).
       // Mục approved sau khi lưu phải có approved_by là email người vừa lưu.
       allow update: if isAdmin()
         && request.resource.data.keys().hasOnly(kbKeys())
@@ -127,7 +131,8 @@ service cloud.firestore {
       allow get: if isAdmin() && docId == 'main';
       allow update: if isAdmin() && docId == 'main'
         && changed().hasOnly(['ai_enabled', 'confidence_threshold', 'handoff_message', 'reply_enabled',
-                              'allowed_chat_ids', 'chat_labels', 'updated_at', 'updated_by'])
+                              'allowed_chat_ids', 'chat_labels', 'max_images_per_answer',
+                              'updated_at', 'updated_by'])
         && request.resource.data.updated_at == request.time
         && request.resource.data.updated_by == adminEmail()
         && (!('ai_enabled' in request.resource.data) || request.resource.data.ai_enabled is bool)
@@ -141,6 +146,10 @@ service cloud.firestore {
         && (!('allowed_chat_ids' in request.resource.data)
             || (request.resource.data.allowed_chat_ids is list
                 && request.resource.data.allowed_chat_ids.size() <= 50))
+        && (!('max_images_per_answer' in request.resource.data)
+            || (request.resource.data.max_images_per_answer is int
+                && request.resource.data.max_images_per_answer >= 0
+                && request.resource.data.max_images_per_answer <= 10))
         && (!('chat_labels' in request.resource.data)
             || (request.resource.data.chat_labels is map
                 && request.resource.data.chat_labels.size() <= 50));

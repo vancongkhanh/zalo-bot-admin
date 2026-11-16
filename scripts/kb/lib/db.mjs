@@ -57,7 +57,7 @@ export async function applyPlan(database, plan) {
     const data = {
       ...c.data,
       steps: [],
-      image_urls: [],
+      images: [], // bước E: ảnh chỉ tải lên từ trang quản trị
       hit_count: 0,
       last_hit_at: null,
       created_at: now,
@@ -73,7 +73,9 @@ export async function applyPlan(database, plan) {
     ops.push((batch) => batch.create(database.collection(KB).doc(c.slug), data));
   }
   for (const u of plan.updates) {
-    const data = { ...u.data, updated_at: now };
+    // u.data chỉ gồm trường nội dung chữ: không bao giờ ghi images (ảnh tải từ trang quản trị).
+    const { images: _ignored, ...content } = u.data;
+    const data = { ...content, updated_at: now };
     if (u.statusChange && u.statusChange[1] === "approved") {
       data.approved_at = now;
       data.approved_by = IMPORT_APPROVER;

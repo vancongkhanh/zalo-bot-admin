@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, it, vi } from "vitest";
-import { buildAnswerText, clusterKey, KbItem, unansweredId } from "../src/kb";
+import { buildAnswerText, clusterKey, KbItem, planImages, toKbItem, unansweredId } from "../src/kb";
 import { AiClient, buildRequest, parseSelection, selectItem } from "../src/selector";
 
 const ITEMS: KbItem[] = [
@@ -120,6 +120,7 @@ describe("kb: ghép câu trả lời", () => {
     expect(buildAnswerText(item)).toEqual({
       text: "Nội dung.\n\nVideo: https://youtu.be/1\nTài liệu: https://drive.google.com/2",
       droppedLinks: 0,
+      droppedImageLinks: 0,
     });
   });
   it("quá giới hạn → bỏ bớt link từ cuối", () => {
@@ -138,5 +139,62 @@ describe("kb: cluster_key", () => {
     const id = unansweredId(clusterKey("Đổi mật khẩu?"));
     expect(id).toMatch(/^[0-9a-f]{32}$/);
     expect(unansweredId(clusterKey("doi mat khau"))).toBe(id);
+  });
+});
+
+describe("kb: ảnh (bước E)", () => {
+  const images = [1, 2, 3, 4, 5, 6].map((i) => ({ url: `https://x.test/${i}.jpg`, caption: i === 2 ? "Riêng" : "" }));
+
+  it("toKbItem đọc images, bỏ link không https, cắt chú thích 200 ký tự, tối đa 10 ảnh", () => {
+    const it2 = toKbItem("a", {
+      title: "A",
+      answer: "B",
+      images: [
+        { url: "https://x.test/1.jpg", caption: "c".repeat(250), path: "kb_images/a/1.jpg" },
+        { url: "http://x.test/2.jpg" },
+        null,
+        ...Array.from({ length: 12 }, (_, i) => ({ url: `https://x.test/n${i}.jpg` })),
+      ],
+    })!;
+    expect(it2.images).toHaveLength(10);
+    expect(it2.images![0]).toEqual({ url: "https://x.test/1.jpg", caption: "c".repeat(200) });
+    expect(it2.images![1]).toEqual({ url: "https://x.test/n0.jpg", caption: "" });
+    expect(toKbItem("a", { title: "A", answer: "B" })!.images).toEqual([]);
+  });
+
+  it("planImages: gửi n ảnh đầu, còn lại thành link, chú thích Bước i/tổng", () => {
+    const p = planImages(images, 4, 0, 3000);
+    expect(p.photos.map((x) => x.caption)).toEqual(["Bước 1/6", "Riêng", "Bước 3/6", "Bước 4/6"]);
+    expect(p.links).toEqual([
+      { index: 5, url: "https://x.test/5.jpg" },
+      { index: 6, url: "https://x.test/6.jpg" },
+    ]);
+    expect(p.quotaLimited).toBe(false);
+  });
+
+  it("planImages: hạn mức không đủ → không gửi ảnh nào, tất cả thành link", () => {
+    const p = planImages(images.slice(0, 3), 4, 2997, 3000);
+    expect(p.photos).toEqual([]);
+    expect(p.links.map((l) => l.index)).toEqual([1, 2, 3]);
+    expect(p.quotaLimited).toBe(true);
+    expect(planImages(images.slice(0, 3), 4, 2996, 3000).photos).toHaveLength(3);
+  });
+
+  it("planImages: không có ảnh hoặc tối đa 0 → không gửi, không coi là thiếu hạn mức", () => {
+    expect(planImages([], 4, 3000, 3000)).toEqual({ photos: [], links: [], quotaLimited: false });
+    expect(planImages(images.slice(0, 2), 0, 0, 3000).quotaLimited).toBe(false);
+  });
+
+  it("buildAnswerText: link ảnh sau link thường; quá dài thì bỏ link ảnh trước", () => {
+    const item: KbItem = { slug: "a", title: "A", questions: [], answer: "Nội dung.", links: [{ label: "Video", url: "https://youtu.be/1" }] };
+    const links = [{ index: 5, url: "https://x.test/5.jpg" }, { index: 6, url: "https://x.test/6.jpg" }];
+    expect(buildAnswerText(item, 2000, links).text).toBe(
+      "Nội dung.\n\nVideo: https://youtu.be/1\n\nẢnh 5: https://x.test/5.jpg\nẢnh 6: https://x.test/6.jpg",
+    );
+    const r = buildAnswerText({ ...item, answer: "x".repeat(1940) }, 2000, links);
+    expect(r).toMatchObject({ droppedImageLinks: 1, droppedLinks: 0 });
+    expect(r.text.endsWith("Ảnh 5: https://x.test/5.jpg")).toBe(true);
+    const r2 = buildAnswerText({ ...item, answer: "x".repeat(1985) }, 2000, links);
+    expect(r2).toMatchObject({ droppedImageLinks: 2, droppedLinks: 1, text: "x".repeat(1985) });
   });
 });

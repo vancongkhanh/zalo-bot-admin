@@ -5,7 +5,7 @@
  * logger và đồng hồ được truyền vào, để kiểm thử đơn vị được.
  */
 import { BotConfig, QUOTA_WARNING_RATIO, dayKey, monthKey } from "./config";
-import { buildAnswerText, clusterKey, KbItem, sampleText, unansweredId } from "./kb";
+import { buildAnswerText, clusterKey, KbItem, planImages, sampleText, unansweredId } from "./kb";
 import { stripMention } from "./mention";
 import { SECRET_HEADER, headerValue, safeEqual } from "./security";
 import { AiClient, selectItem, Selection } from "./selector";
@@ -348,31 +348,74 @@ async function answerWithAi(input: AiFlowInput): Promise<void> {
   const { item, reason, selection } = await decide(input);
   const okSel = selection?.ok ? selection : null;
 
+  // Bước E: ảnh của mục (chỉ mục approved, AI không chọn ảnh).
+  const images = item?.images ?? [];
+  const plan = planImages(images, config.maxImagesPerAnswer, sent, config.monthlyMessageLimit);
+  if (plan.quotaLimited) {
+    logger.warn("Hạn mức tin không đủ cho ảnh, ảnh chuyển thành link", {
+      message_id: messageId,
+      slug: item?.slug,
+      images: images.length,
+      messages_sent: sent,
+      limit: config.monthlyMessageLimit,
+    });
+  }
+
   let replyText: string;
+  let imagesAsLinks = 0;
   if (item) {
-    const built = buildAnswerText(item);
+    const built = buildAnswerText(item, undefined, plan.links);
     replyText = built.text;
-    if (built.droppedLinks > 0) {
-      logger.warn("Câu trả lời quá 2.000 ký tự, đã bỏ bớt link", { slug: item.slug, dropped_links: built.droppedLinks });
+    imagesAsLinks = plan.links.length - built.droppedImageLinks;
+    if (built.droppedLinks > 0 || built.droppedImageLinks > 0) {
+      logger.warn("Câu trả lời quá 2.000 ký tự, đã bỏ bớt link", {
+        slug: item.slug,
+        dropped_links: built.droppedLinks,
+        dropped_image_links: built.droppedImageLinks,
+      });
     }
   } else {
     replyText = config.handoffMessage;
   }
 
-  const result = await deps.getZaloClient().sendMessage(chatId, replyText);
+  const zalo = deps.getZaloClient();
+  const result = await zalo.sendMessage(chatId, replyText);
   if (result.ok) {
     await store.recordSendSuccess(month);
   } else {
     await store.recordSendError(month);
     logger.error("Gửi tin thất bại", { message_id: messageId, chat_id: chatId, error: result.error });
   }
-  await maybeWarnQuota(store, logger, config, month, sent + 1);
+
+  // Tin chữ lỗi thì không gửi ảnh. Ảnh lỗi: ghi lỗi, gửi tiếp ảnh sau (quyết định 8).
+  let imagesSent = 0;
+  let imageErrors = 0;
+  if (result.ok) {
+    for (const photo of plan.photos) {
+      const r = await zalo.sendPhoto(chatId, photo.url, photo.caption);
+      await store.recordPhotoSend(month, r.ok);
+      if (r.ok) {
+        imagesSent++;
+      } else {
+        imageErrors++;
+        logger.error("Gửi ảnh thất bại", {
+          message_id: messageId,
+          chat_id: chatId,
+          slug: item?.slug,
+          image_index: photo.index,
+          error: r.error,
+        });
+      }
+    }
+  }
+  await maybeWarnQuota(store, logger, config, month, sent + 1 + imagesSent + imageErrors);
 
   const outcome = item ? "answered" : "handoff";
   await store.recordDailyStat(dayKey(new Date(now())), {
     outcome,
     aiError: reason === "ai_error",
     slug: item && result.ok ? item.slug : null,
+    ...(imagesSent > 0 ? { photosSent: imagesSent } : {}),
   });
   if (item && result.ok) await store.recordHit(item.slug);
   if (!item && reason) {
@@ -400,6 +443,9 @@ async function answerWithAi(input: AiFlowInput): Promise<void> {
     reason,
     ai_ms: selection?.ms ?? null,
     send_ok: result.ok,
+    ...(images.length > 0
+      ? { images_sent: imagesSent, image_errors: imageErrors, images_as_links: imagesAsLinks }
+      : {}),
   };
   await store.writeConversation(messageId, record);
   await store.setEventState(messageId, result.ok ? "done" : "failed");
@@ -411,6 +457,9 @@ async function answerWithAi(input: AiFlowInput): Promise<void> {
     matched_slug: record.matched_slug,
     confidence: record.confidence,
     ai_ms: record.ai_ms,
+    images_sent: record.images_sent,
+    image_errors: record.image_errors,
+    images_as_links: record.images_as_links,
     duration_ms: record.duration_ms,
   });
 }

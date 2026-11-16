@@ -101,3 +101,18 @@ describe("monthKey", () => {
     expect(monthKey(new Date("2026-10-31T16:59:00Z"))).toBe("2026-10");
   });
 });
+
+describe("parseConfig: max_images_per_answer (bước E)", () => {
+  it("mặc định 4; nhận số nguyên 0-10", () => {
+    expect(DEFAULT_CONFIG.maxImagesPerAnswer).toBe(4);
+    expect(parseConfig({ max_images_per_answer: 0 }).config.maxImagesPerAnswer).toBe(0);
+    expect(parseConfig({ max_images_per_answer: 10 }).config.maxImagesPerAnswer).toBe(10);
+  });
+  it("ngoài khoảng, số lẻ hoặc sai kiểu → mặc định và cảnh báo", () => {
+    for (const v of [11, -1, 2.5, "4"]) {
+      const { config, warnings } = parseConfig({ max_images_per_answer: v });
+      expect(config.maxImagesPerAnswer).toBe(4);
+      expect(warnings).toHaveLength(1);
+    }
+  });
+});
