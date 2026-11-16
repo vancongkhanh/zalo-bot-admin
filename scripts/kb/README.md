@@ -1,7 +1,9 @@
-# Script kho tri thức (bước B)
+# Script kho tri thức (bước B, C)
 
-Nạp, xuất, duyệt kho `kb_items` từ Excel. Chạy trên máy bạn, ghi thẳng vào Firestore dự án trong `.firebaserc`.
+Nạp, xuất, duyệt kho `kb_items` từ Excel và đo chất lượng chọn mục. Chạy trên máy bạn, ghi thẳng vào Firestore dự án trong `.firebaserc`.
 Không đụng `zaloWebhook`, `config/main`, `usage`, `conversations`, `processed_events`.
+
+Từ bước D có thể sửa kho ngay trên trang quản trị. Hai cách dùng song song được; trang báo lỗi nếu mục vừa bị script sửa trong lúc đang mở. Nên chọn một nơi làm chính để Excel không lệch với Firestore: sửa trên trang thì `kb-export` ra Excel trước khi sửa Excel lần sau.
 
 ## Chuẩn bị (một lần)
 
@@ -39,7 +41,10 @@ Tệp Excel dữ liệu thật đặt trong `input/` (thư mục này không đ�
 - Mục mới: `version` 1. Nội dung đổi: `version` tăng; chỉ đổi trạng thái thì không.
 - Mục đang `approved`: không bị ghi đè hay hạ trạng thái nếu không có `--ghi-de-approved`; script báo trường khác.
 - Mục có trong kho nhưng không còn trong tệp: giữ nguyên, chỉ liệt kê. Script **không bao giờ xóa** mục.
-- `approved_by`: `kb-import` (duyệt qua Excel) hoặc `kb-approve`.
+- `approved_by`: `kb-import` (duyệt qua Excel), `kb-approve`, hoặc email người duyệt trên trang quản trị.
+- **Cẩn thận với `--ghi-de-approved`:** cột `trang_thai` trong Excel là nguồn chuẩn. Dòng để trống hoặc `draft` sẽ đưa mục đang `approved` về `draft` (bot ngừng dùng). Ghi `approved` cho các mục muốn giữ, và xem cột trạng thái ở bước `--thu` (dạng `approved → draft`) trước khi nạp thật.
+
+Lệnh chạy được từ thư mục gốc dự án, ví dụ `node scripts/kb/kb-import.mjs input/mau-kho-tri-thuc.xlsx --thu` (đường dẫn tệp tính từ thư mục đang đứng). Đứng trong `functions` thì lệnh báo `Cannot find module`.
 
 ## Bộ thử (`Bo_thu`)
 
@@ -52,3 +57,7 @@ Cột `stt`, `cau_hoi_that`, `slug_dung`, `ghi_chu`. Mã tài liệu `t-01`, `t-
 3. Chạy `node scripts/kb/eval-run.mjs --model=haiku` rồi `--model=sonnet` để so.
 
 Ngưỡng và model mặc định lấy từ `config/main`. Kết luận: `đúng`, `SAI MỤC`, `chuyển ca đúng`, `chuyển ca thừa`, `TRẢ LỜI SAI KHI KHO KHÔNG CÓ`, `lỗi AI`. Mục mong đợi chưa `approved` được tính như kho không có.
+
+Kết quả đo 16/11/2026 (Haiku, ngưỡng 0,7, 4 mục approved, 5 câu thử): 3 đúng, 1 sai mục, 1 chuyển ca thừa, 0 lỗi; trung vị 1,8 giây; khoảng $0,15 / 1.000 câu. Cặp `ky-so` và `cau-hinh-chu-ky` bị nhầm: AI chỉ thấy `tieu_de` và `cach_hoi`, nên cần viết hai mục này cho rõ ranh giới. Không chép nguyên câu thử vào `cach_hoi` (điểm đo sẽ đẹp giả). Chưa so với Sonnet. Chi phí tăng theo số mục vì mỗi lần hỏi gửi kèm danh sách mục.
+
+Số token vào không đổi giữa hai lần chạy nghĩa là danh sách mục không đổi: kho trên Firestore chưa được nạp lại (nạp lại câu thử bằng `eval-import-testset` không cập nhật kho).

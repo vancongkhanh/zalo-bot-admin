@@ -1,10 +1,26 @@
 # Bot Zalo hỗ trợ khách hàng tích hợp AI: tổng kết và kế hoạch thực hiện
 
-Cập nhật: 16/11/2026. Tài liệu này tổng hợp các quyết định, kết quả thử nghiệm giai đoạn 0 và kế hoạch làm từng bước. Bản đề xuất đầy đủ (kèm nguồn) nằm trong tài liệu "Đề xuất: Bot Zalo hỗ trợ khách hàng tích hợp AI". Mục nào ghi "Đề xuất" là chưa được bạn chốt; mục ghi "Chưa xác minh" cần thử trước khi tin cậy.
+Cập nhật: 16/11/2026 (tối: thêm mục "Tiến độ" ngay dưới). Tài liệu này tổng hợp các quyết định, kết quả thử nghiệm giai đoạn 0 và kế hoạch làm từng bước. Bản đề xuất đầy đủ (kèm nguồn) nằm trong tài liệu "Đề xuất: Bot Zalo hỗ trợ khách hàng tích hợp AI". Mục nào ghi "Đề xuất" là chưa được bạn chốt; mục ghi "Chưa xác minh" cần thử trước khi tin cậy.
 
 ## 1. Mục tiêu
 
 Bot Zalo trả lời câu hỏi hướng dẫn sử dụng (HDSD) trong nhóm Zalo của người dùng khối chính quyền, dựa trên PDF, ảnh và video HDSD đã có. AI chỉ trả lời từ nội dung đã duyệt trong kho tri thức. Câu hỏi bot chưa trả lời được sẽ hiện trên trang quản trị để bạn soạn đáp án, duyệt và đưa vào kho. Giai đoạn đầu chỉ mình bạn dùng và nhận ca chuyển giao.
+
+## Tiến độ (16/11/2026)
+
+Thứ tự làm đã đổi theo [spec/spec-buoc-A-B-C-D.md](spec/spec-buoc-A-B-C-D.md): bỏ qua nhập PDF/ảnh (giai đoạn 2 cũ, để sau), làm trước vòng khép kín bằng kho chữ. Chi tiết: [báo cáo/bao-cao-buoc-B-C-D.md](báo%20cáo/bao-cao-buoc-B-C-D.md).
+
+| Phần | Tương ứng kế hoạch dưới | Trạng thái |
+|---|---|---|
+| Giai đoạn 1: webhook | Giai đoạn 1 | Xong, qua cổng duyệt |
+| A: soạn kho chữ và bộ thử | Giai đoạn 2 (phần chữ) | Đang làm: 4 mục `approved`, 5 câu thử (mục tiêu 30-50 mục, 30 câu) |
+| B: script nạp/xuất/duyệt Excel | Giai đoạn 2 | Xong |
+| C: AI chọn mục, trả lời nguyên văn | Giai đoạn 3 | Đã triển khai và bật; trả lời và chuyển ca đúng trên Zalo thật. Còn thiếu bộ thử đủ 30 câu và so Sonnet |
+| D: trang quản trị | Giai đoạn 4 | Đã lên GitHub Pages, quy tắc đã triển khai; chờ tạo `admins/{uid}` để thử vòng khép kín |
+| Nhập PDF, ảnh, `sendPhoto` | Giai đoạn 2 (bước 2.3, 2.4), 3.5 | Chưa làm (`steps`, `image_urls` đã chừa chỗ trong `kb_items`) |
+| Chạy thử và vận hành | Giai đoạn 5 | Bắt đầu khi vòng khép kín chạy được |
+
+Thay đổi so với kế hoạch dưới: **AI không soạn câu trả lời**, chỉ chọn mục (`{slug, confidence}`), bot gửi nguyên văn nội dung đã duyệt (bảng quyết định trong spec A-D, mục 1). Model đã chốt: Haiku 5.5. Trang quản trị: HTML đơn trên GitHub Pages (`vancongkhanh.github.io/zalo-bot-admin`). Cấu trúc dữ liệu thực tế xem [README.md](README.md); bảng "Dữ liệu trong Firestore" ở mục 5 là bản đề xuất ban đầu.
 
 ## 2. Các quyết định đã chốt
 
@@ -264,12 +280,12 @@ Kết quả `"ok":true` và ảnh hiện trong nhóm thì `sendPhoto` dùng đư
 
 ## 12. Câu hỏi còn mở
 
-| # | Câu hỏi | Khi nào |
+| # | Câu hỏi | Trạng thái |
 |---|---|---|
-| 1 | Dự án Firebase: dùng dự án có sẵn hay tạo mới? | Trước giai đoạn 1 |
-| 2 | Node.js hay Python cho Cloud Functions? (đề xuất Node.js) | Trước giai đoạn 1 |
-| 3 | Tên bot hiển thị trong nhóm để cắt phần @ (ví dụ "Bot TTHC Đảng") | Trước giai đoạn 1 |
-| 4 | Lưu ảnh ở Firebase Storage hay GitHub Pages? | Trước giai đoạn 2 |
-| 5 | Haiku hay Sonnet? | Giai đoạn 3 |
-| 6 | Ngưỡng "đủ chắc chắn" và danh sách chủ đề ưu tiên | Giai đoạn 2-3 |
-| 7 | Địa chỉ (tên miền) cho trang quản trị | Giai đoạn 4 |
+| 1 | Dự án Firebase: dùng dự án có sẵn hay tạo mới? | Đã chốt: `zalo-bot-tthc-dang` |
+| 2 | Node.js hay Python cho Cloud Functions? | Đã chốt: Node.js 24, TypeScript |
+| 3 | Tên bot hiển thị trong nhóm để cắt phần @ | Đã chốt: "Bot TTHC Đảng" |
+| 4 | Lưu ảnh ở Firebase Storage hay GitHub Pages? | Còn mở, khi làm nhập PDF/ảnh |
+| 5 | Haiku hay Sonnet? | Đã chốt: Haiku 5.5. Nên so lại với Sonnet khi bộ thử đủ 30 câu |
+| 6 | Ngưỡng "đủ chắc chắn" và danh sách chủ đề ưu tiên | Ngưỡng tạm 0,7; chỉnh sau khi có bộ thử đủ. Chủ đề ưu tiên: lấy từ `unanswered` |
+| 7 | Địa chỉ (tên miền) cho trang quản trị | Đã chốt: `vancongkhanh.github.io/zalo-bot-admin` |

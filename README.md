@@ -1,47 +1,63 @@
-# Bot TTHC Đảng: webhook giai đoạn 1
+# Bot TTHC Đảng
 
-Backend nhận tin từ Zalo Bot qua webhook, chạy trên Firebase Cloud Functions (thế hệ 2, Node.js 24, vùng `asia-southeast1`).
-Phạm vi giai đoạn 1: xác thực, chống trùng, chỉ trả lời nhóm được phép, trả lời cố định `Đã nhận: {câu hỏi}`, nhật ký và bộ đếm. Chưa có AI hay kho tri thức.
+Bot Zalo trả lời câu hỏi hướng dẫn sử dụng trong nhóm Zalo. Người dùng nhắn `@Bot TTHC Đảng <câu hỏi>`. AI (Claude Haiku 5.5) **chỉ chọn** mục phù hợp trong kho tri thức đã duyệt, rồi bot gửi **nguyên văn** nội dung mục đó. Câu không trả lời được thì bot gửi tin chuyển ca, và câu đó hiện trên trang quản trị để bạn bổ sung đáp án.
 
-- Dự án Firebase: `zalo-bot-tthc-dang`
-- Địa chỉ webhook: `https://asia-southeast1-zalo-bot-tthc-dang.cloudfunctions.net/zaloWebhook`
+- Dự án Firebase: `zalo-bot-tthc-dang` (Cloud Functions thế hệ 2, Node.js 24, vùng `asia-southeast1`)
+- Webhook: `https://asia-southeast1-zalo-bot-tthc-dang.cloudfunctions.net/zaloWebhook`
+- Trang quản trị: `https://vancongkhanh.github.io/zalo-bot-admin/` (kho GitHub riêng `zalo-bot-admin`)
+- Báo cáo chi tiết từng bước: [báo cáo/](báo%20cáo/), spec: [spec/](spec/), kế hoạch tổng: [zalo-bot-ke-hoach-thuc-hien.md](zalo-bot-ke-hoach-thuc-hien.md)
+
+## Trạng thái (16/11/2026)
+
+| Bước | Nội dung | Trạng thái |
+|---|---|---|
+| Giai đoạn 1 | Webhook: xác thực, chống trùng, nhóm được phép, nhật ký, bộ đếm | Đã triển khai, qua cổng duyệt |
+| B | Script nạp/xuất/duyệt kho từ Excel (`scripts/kb`) | Xong, đạt B1-B6 |
+| C | AI chọn mục, trả lời nguyên văn, chuyển ca, `unanswered`, thống kê | Đã triển khai 16/11 16:21, `ai_enabled` đang bật; C2, C3, C8 đạt khi chạy thật |
+| D | Trang quản trị + quy tắc Firestore | Quy tắc đã triển khai; trang đã lên GitHub Pages; chờ tạo `admins/{uid}` để thử D2-D6 |
+
+Xem [báo cáo/bao-cao-buoc-B-C-D.md](báo%20cáo/bao-cao-buoc-B-C-D.md) để biết tiêu chí từng bước, chi phí đo được và việc còn lại.
 
 ## Cấu trúc
 
 ```
-firebase.json, .firebaserc, firestore.rules, firestore.indexes.json (TTL cho processed_events.expire_at)
+firebase.json, .firebaserc
+firestore.rules           quy tắc: chỉ admins/{uid} đọc/ghi qua trang quản trị; mọi thứ khác từ chối
+firestore.indexes.json    chỉ mục unanswered; TTL cho processed_events.expire_at, conversations.expire_at
 functions/src/
-  index.ts       hàm zaloWebhook: nối secrets, Firestore, logger vào luồng xử lý
-  webhook.ts     luồng xử lý chính (spec mục 6)
+  index.ts       hàm zaloWebhook: nối secrets, Firestore, logger, Anthropic vào luồng xử lý
+  webhook.ts     luồng xử lý chính (giai đoạn 1 + bước C)
+  selector.ts    gọi Claude chọn mục: trả {slug, confidence}, kiểm tra đầu ra
+  kb.ts          mục kho, ghép câu trả lời + link, chuẩn hóa câu hỏi cho unanswered
   zaloClient.ts  sendMessage, sendPhoto (chưa dùng), setWebhook, deleteWebhook, getMe, getWebhookInfo
   mention.ts     cắt @tên bot
   security.ts    so sánh secret thời gian không đổi
-  store.ts       Firestore: chống trùng, nhật ký, bộ đếm, cấu hình
-  config.ts      secrets, đọc config/main, tháng theo giờ Việt Nam
+  store.ts       Firestore: chống trùng, nhật ký, bộ đếm, cấu hình, kho, unanswered, stats_daily
+  config.ts      secrets, đọc config/main, ngày/tháng theo giờ Việt Nam
 functions/test/  kiểm thử đơn vị (vitest)
 scripts/
-  webhook-set.mjs     đăng ký webhook
-  webhook-delete.mjs  xóa webhook (để quay lại getUpdates)
-  check-bot.mjs       chẩn đoán: getMe + getWebhookInfo (chỉ đọc)
-  send-sample.mjs     gửi sự kiện mẫu tới hàm để thử, in mã HTTP và thời gian
-  sample-event.json   sự kiện mẫu (toàn giá trị giả)
-  test-photo.mjs      thử sendPhoto (ngoài phạm vi giai đoạn 1)
-  kb/                 script kho tri thức và đo chất lượng (bước B, C), xem scripts/kb/README.md
+  webhook-set.mjs, webhook-delete.mjs, check-bot.mjs   đăng ký, xóa, chẩn đoán webhook
+  send-sample.mjs, sample-event.json                   gửi sự kiện mẫu (giá trị giả) tới hàm
+  test-photo.mjs      thử sendPhoto (chưa dùng)
+  kb/                 kho tri thức và đo chất lượng (bước B, C), xem scripts/kb/README.md
 admin/
-  index.html          trang quản trị (bước D), một tệp, đưa lên GitHub Pages; xem admin/README.md
-  test/               kiểm thử logic của trang và quy tắc Firestore (emulator)
+  index.html          trang quản trị (bước D), một tệp; bản chạy thật chép sang kho zalo-bot-admin
+  test/               kiểm thử logic trang và quy tắc Firestore (emulator), dữ liệu giả để xem trước
+  README.md           cài đặt, quyền, kiểm thử, xem trước
+input/                Excel dữ liệu thật (không commit)
 ```
 
 ## Bí mật
 
-Không bao giờ ghi token, secret hay mã nhóm thật vào mã nguồn hoặc Git.
+Không bao giờ ghi token, secret, khóa hay mã nhóm thật vào mã nguồn, Git hay nhật ký. Không tạo tệp khóa dịch vụ.
 
 | Tên | Lưu ở | Ghi chú |
 |---|---|---|
 | `ZALO_BOT_TOKEN` | Firebase secret | Token bot |
-| `ZALO_WEBHOOK_SECRET` | Firebase secret | 8-256 ký tự, **chỉ `A-Z a-z 0-9 _ -`** (Zalo từ chối ký tự khác) |
-| `ANTHROPIC_API_KEY` | Firebase secret | Khóa Anthropic (bước C). **Phải đặt trước khi triển khai** bản có bước C, kể cả khi `ai_enabled` tắt |
+| `ZALO_WEBHOOK_SECRET` | Firebase secret | 8-256 ký tự, **chỉ `A-Z a-z 0-9 _ -`** (Zalo từ chối ký tự khác). Đang dùng phiên bản 2 |
+| `ANTHROPIC_API_KEY` | Firebase secret | Khóa Anthropic (workspace Zalo-bot, hạn mức chi tiêu tháng đặt ở Anthropic Console). **Phải có trước khi triển khai** hàm, kể cả khi `ai_enabled` tắt. Khóa có hạn dùng: đổi trước khi hết hạn |
 | Mã nhóm | Firestore `config/main` | Không ghi vào mã |
+| Cấu hình Web app Firebase | `admin/index.html` | Công khai theo thiết kế; an toàn dựa vào đăng nhập Google và quy tắc Firestore |
 
 Đặt hoặc đổi secret (gõ giá trị tại dấu nhắc; dán bằng chuột phải trong cmd):
 
@@ -59,52 +75,69 @@ Sau khi đổi secret phải **triển khai lại** (`firebase deploy --only fun
 
 | Trường | Kiểu | Ý nghĩa |
 |---|---|---|
-| `allowed_chat_ids` | array chuỗi | Mã nhóm được phép (`zgr-...`). Nhiều nhóm được; gói Basic cho tối đa 3 nhóm |
+| `allowed_chat_ids` | array chuỗi | Mã nhóm được phép (`zgr-...`). Gói Basic cho tối đa 3 nhóm |
+| `chat_labels` | map | Tên dễ nhớ cho từng mã nhóm (trang quản trị dùng; bot bỏ qua) |
 | `bot_mention_name` | string | `Bot TTHC Đảng` |
 | `monthly_message_limit` | number | `3000` |
 | `reply_enabled` | boolean | `false` để tạm tắt trả lời, vẫn ghi nhật ký |
 | `log_raw_body` | boolean | `true`: ghi thân yêu cầu (đã che nội dung, tên, mã người dùng) ra Cloud Logging. Tắt khi không cần |
-| `ai_enabled` | boolean | Bước C. Mặc định `false`: trả lời như giai đoạn 1 ("Đã nhận: ...") |
+| `ai_enabled` | boolean | Mặc định `false`: trả lời như giai đoạn 1 ("Đã nhận: ..."). `true`: trả lời bằng kho qua AI |
 | `ai_model` | string | Mặc định `claude-haiku-5-5` |
 | `confidence_threshold` | number 0-1 | Mặc định `0.7`. Dưới ngưỡng thì chuyển ca |
-| `monthly_ai_call_limit` | number | Mặc định `6000`. Hết hạn mức: không gọi AI, gửi tin mẫu |
+| `monthly_ai_call_limit` | number | Mặc định `6000`. Hết hạn mức: không gọi AI, gửi tin chuyển ca |
 | `handoff_message` | string | Tin chuyển ca (tối đa 1.000 ký tự) |
 | `ai_timeout_ms` | number | Mặc định `15000`, cho phép 1.000-50.000 |
+| `updated_at`, `updated_by` | | Trang quản trị ghi khi lưu Cài đặt |
 
-Giá trị sai kiểu hoặc ngoài khoảng: hàm dùng mặc định và ghi cảnh báo "Cấu hình config/main".
+Giá trị sai kiểu hoặc ngoài khoảng: hàm dùng mặc định và ghi cảnh báo "Cấu hình config/main". Hàm đọc lại cấu hình ở mỗi yêu cầu: sửa trong Console hoặc trang quản trị là có hiệu lực từ tin tiếp theo.
 
-Hàm đọc lại cấu hình ở mỗi yêu cầu: sửa trong Console là có hiệu lực ngay.
+**Tắt AI khẩn cấp:** đặt `ai_enabled` = `false` (trang quản trị > Cài đặt, hoặc Firestore Console). Không cần triển khai lại.
 
-## Dữ liệu ghi ra
+## Luồng xử lý một câu hỏi
+
+1. Kiểm tra header bí mật, loại sự kiện, nhóm được phép, chống trùng theo `message_id` (ghi **trước** khi gọi AI), cắt @tên bot, hạn mức tin tháng.
+2. `ai_enabled = false`: trả "Đã nhận: ..." như giai đoạn 1. Câu hỏi rỗng: gửi tin hướng dẫn.
+3. Đọc các mục `approved` (bộ nhớ đệm 60 giây). Gọi Claude **một lần** với câu hỏi và danh sách mục (slug, tiêu đề, cách hỏi; **không gửi nội dung trả lời**). Đầu ra JSON `{slug, confidence}` được kiểm tra: JSON hợp lệ, slug có trong danh sách, confidence 0-1.
+4. Slug hợp lệ và `confidence >= confidence_threshold`: gửi nguyên văn `answer` + link (`Nhãn: URL`), tối đa 2.000 ký tự.
+5. Không có slug, dưới ngưỡng, lỗi/hết giờ AI, hết hạn mức AI: gửi `handoff_message`, ghi `unanswered`.
+6. Ghi `conversations`, `usage`, `stats_daily`, `hit_count`. Luôn trả HTTP 200.
+
+## Dữ liệu trong Firestore
 
 | Nơi | Nội dung |
 |---|---|
 | `processed_events/{message_id}` | `received_at`, `state` (`processing`/`done`/`failed`), `expire_at` (+7 ngày, TTL tự xóa) |
-| `conversations/{message_id}` | `chat_id`, `from_id`, `display_name`, `question`, `reply_text`, `outcome` (`replied`/`ignored`/`error`/`answered`/`handoff`), `ignore_reason`, `error`, `duration_ms`, `created_at`, `expire_at` (+90 ngày, TTL). Bước C thêm `matched_slug`, `confidence`, `reason` (`no_match`/`low_confidence`/`ai_error`/`ai_quota`), `ai_ms`, `send_ok` |
+| `conversations/{message_id}` | `chat_id`, `from_id`, `display_name`, `question`, `reply_text`, `outcome` (`replied`/`ignored`/`error`/`answered`/`handoff`), `ignore_reason`, `error`, `duration_ms`, `created_at`, `expire_at` (+90 ngày, TTL). Khi qua AI thêm `matched_slug`, `confidence`, `reason` (`no_match`/`low_confidence`/`ai_error`/`ai_quota`), `ai_ms`, `send_ok` |
 | `usage/{YYYY-MM}` | `messages_sent` (đếm mọi lần gọi `sendMessage`, kể cả lỗi), `send_errors`, `quota_warning_sent`, `ai_calls`, `ai_errors`, `ai_input_tokens`, `ai_output_tokens` (tháng theo giờ Việt Nam) |
-| `stats_daily/{YYYY-MM-DD}` | Bước C: `questions`, `answered`, `handoff`, `ai_errors`, `item_hits.{slug}` (ngày theo giờ Việt Nam) |
-| `unanswered/{id}` | Bước C: câu chuyển ca gộp theo câu đã chuẩn hóa. `cluster_key`, `samples` (≤ 3), `count`, `first_asked_at`, `last_asked_at`, `reason`, `best_guess_slug`, `best_guess_confidence`, `status` (`new`/`answered`/`ignored`), `answered_slug`, `answered_at`. Không lưu mã người dùng |
-| `kb_items/{slug}` | Bước C tăng `hit_count`, cập nhật `last_hit_at` khi bot trả lời bằng mục |
+| `stats_daily/{YYYY-MM-DD}` | `questions`, `answered`, `handoff`, `ai_errors`, `item_hits.{slug}` (ngày theo giờ Việt Nam; chung mọi nhóm) |
+| `unanswered/{id}` | Câu chuyển ca gộp theo câu đã chuẩn hóa (bỏ dấu, chữ thường). `cluster_key`, `samples` (≤ 3), `count`, `first_asked_at`, `last_asked_at`, `reason`, `best_guess_slug`, `best_guess_confidence`, `status` (`new`/`answered`/`ignored`), `answered_slug`, `answered_at`, `handled_by`. Không lưu mã người dùng. Hỏi lại câu đã xử lý mà bot vẫn chuyển ca thì về lại `new` |
+| `kb_items/{slug}` | `title`, `topic`, `questions[]`, `answer` (≤ 1.500 ký tự), `links[]` (`label`, `url`, `platform`), `keywords[]`, `source`, `status` (`draft`/`approved`/`hidden`), `version`, `hit_count`, `last_hit_at`, `steps[]`, `image_urls[]` (chừa cho nhập PDF), `created_at`, `updated_at`, `updated_by`, `approved_at`, `approved_by`. Bot chỉ dùng `approved` |
+| `eval_testset/t-NN` | Bộ thử cho `eval-run` (`stt`, `question`, `expected_slug`); bot không đọc |
+| `admins/{uid}` | Tài khoản được dùng trang quản trị (bạn tạo thủ công) |
+| `config/main` | Cấu hình ở trên |
 
 `ignore_reason`: `unsupported_event:<event_name>`, `not_group:<chat_type>`, `no_mention`, `reply_disabled`, `quota`.
 Nhóm không có trong danh sách: không ghi `conversations`, chỉ ghi dòng Cloud Logging "Nhóm không được phép" kèm `chat_id`.
 
 ## Phát triển và kiểm thử
 
-```
-cd functions
-npm install
-npm run build
-npm test
-```
+| Phần | Lệnh | Ghi chú |
+|---|---|---|
+| Hàm | `cd functions`, `npm install`, `npm run build`, `npm test` | 110 kiểm thử |
+| Script kho | `cd scripts/kb`, `npm install`, `npm test` | 49 kiểm thử |
+| Trang quản trị | `cd admin`, `npm install`, `npm test` | 33 kiểm thử logic |
+| Quy tắc Firestore | `cd admin`, `npm run test:rules` | 58 kiểm thử trên emulator, cần Java 21 (Temurin) |
 
 ## Triển khai
 
-```
-firebase deploy --only functions,firestore
-```
+| Việc | Lệnh |
+|---|---|
+| Chỉ hàm | `firebase deploy --only functions` |
+| Chỉ quy tắc và chỉ mục | `firebase deploy --only firestore` |
+| Cả hai | `firebase deploy --only functions,firestore` |
+| Trang quản trị | Tải `admin/index.html` lên kho GitHub `zalo-bot-admin` (thay tệp cũ). Xem [admin/README.md](admin/README.md) |
 
-Từ bước D, `firestore.rules` cho phép tài khoản có trong `admins/{uid}` đọc/ghi qua trang quản trị. Muốn triển khai riêng hàm mà chưa mở quy tắc mới: `firebase deploy --only functions`. Chỉ triển khai quy tắc và chỉ mục: `firebase deploy --only firestore`.
+Lần triển khai gần nhất: hàm có bước C (16/11/2026 16:21), quy tắc và chỉ mục bước D (16/11/2026). Nếu `firebase deploy` báo lỗi "Failed to make request ... adminSdkConfig", chạy lại: thường là lỗi mạng tạm thời.
 
 ## Đăng ký webhook
 
@@ -127,7 +160,7 @@ node scripts/send-sample.mjs                  # 200; nhóm giả nên chỉ ghi 
 node scripts/send-sample.mjs --id X; node scripts/send-sample.mjs --id X   # lần 2 là "Sự kiện trùng"
 ```
 
-Cảnh báo: dùng `--chat` với mã nhóm có trong `allowed_chat_ids` thì bot gửi tin **thật** vào nhóm (trừ khi `--id` đã được xử lý).
+Cảnh báo: dùng `--chat` với mã nhóm có trong `allowed_chat_ids` thì bot gửi tin **thật** vào nhóm (trừ khi `--id` đã được xử lý). Khi `ai_enabled` bật, mỗi lần như vậy còn tốn một lượt gọi AI.
 
 ## Xem nhật ký
 
@@ -135,7 +168,7 @@ Cảnh báo: dùng `--chat` với mã nhóm có trong `allowed_chat_ids` thì bo
 firebase functions:log --only zaloWebhook
 ```
 
-Hoặc Firebase Console, Functions, Logs. Các dòng đáng chú ý: "Nhóm không được phép" (lấy mã nhóm), "Sự kiện trùng", "Đã xử lý sự kiện" (có `duration_ms`), "Đã dùng 80% hạn mức", "Gửi tin thất bại".
+Hoặc Firebase Console, Functions, Logs. Các dòng đáng chú ý: "Nhóm không được phép" (lấy mã nhóm), "Sự kiện trùng", "Đã xử lý sự kiện" (có `duration_ms`), "Đã dùng 80% hạn mức", "Gửi tin thất bại", lỗi AI (`timeout`, `api_<mã>`), "Cấu hình config/main". Nhật ký không ghi nội dung câu hỏi.
 
 ## Điều khác với tài liệu Zalo đã gặp
 
@@ -144,3 +177,4 @@ Hoặc Firebase Console, Functions, Logs. Các dòng đáng chú ý: "Nhóm khô
 - `setWebhook` thành công trả `updated_at: 0`.
 - Sau `setWebhook`, Zalo gửi yêu cầu thử `event_name: "webhook.test"`, `message_id: "webhook-test"`, không có `chat`/`from`, `date` tính bằng giây. Hàm bỏ qua và trả 200.
 - Lỗi API trả HTTP 200 kèm `ok: false`, `error_code`, `description`.
+- Bộ đếm tin của Zalo có vẻ tính cả lần gửi lỗi, nên `messages_sent` đếm mọi lần gọi `sendMessage`.
