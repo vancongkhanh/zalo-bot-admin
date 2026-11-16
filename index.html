@@ -1,0 +1,1217 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<title>Quản trị Bot TTHC</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1d2430; --muted: #5f6b7a; --line: #dde2e8;
+    --accent: #1f5fbf; --accent-text: #ffffff; --ok: #1d7a46; --warn: #a86400; --bad: #b3261e;
+    --ok-bg: #e5f4ea; --warn-bg: #fdf1dc; --bad-bg: #fbe7e5; --chip: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12161c; --card: #1b2129; --text: #e6e9ee; --muted: #9aa5b3; --line: #2d3540;
+      --accent: #6ea2f5; --accent-text: #0b1220; --ok: #6fd39a; --warn: #f0b45a; --bad: #f28b82;
+      --ok-bg: #173225; --warn-bg: #3a2a12; --bad-bg: #3d1a18; --chip: #262e38;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; background: var(--card); border-bottom: 1px solid var(--line); }
+  .bar { max-width: 1100px; margin: 0 auto; padding: 10px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .bar h1 { font-size: 17px; margin: 0; flex: 1 1 auto; }
+  .who { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+  nav { max-width: 1100px; margin: 0 auto; padding: 0 16px; display: flex; gap: 4px; overflow-x: auto; }
+  nav button { border: 0; background: none; padding: 10px 12px; color: var(--muted); border-bottom: 2px solid transparent;
+    font: inherit; cursor: pointer; white-space: nowrap; }
+  nav button.on { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 12px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .grow { flex: 1 1 200px; min-width: 0; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .chip { display: inline-block; background: var(--chip); border-radius: 999px; padding: 1px 9px; font-size: 12px; }
+  .chip.approved { background: var(--ok-bg); color: var(--ok); }
+  .chip.draft { background: var(--warn-bg); color: var(--warn); }
+  .chip.hidden { background: var(--chip); color: var(--muted); }
+  .sample { margin: 2px 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+  button.btn, a.btn { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--text);
+    border-radius: 8px; padding: 7px 12px; cursor: pointer; text-decoration: none; }
+  button.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button.btn.danger { color: var(--bad); }
+  button.btn:disabled { opacity: .5; cursor: not-allowed; }
+  input, select, textarea { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 9px; width: 100%; }
+  textarea { min-height: 80px; resize: vertical; }
+  input[type=checkbox] { width: auto; }
+  label.f { display: block; margin: 10px 0 4px; font-weight: 600; font-size: 14px; }
+  .hint { font-weight: 400; color: var(--muted); font-size: 12px; }
+  .msg { border-radius: 8px; padding: 9px 12px; margin-bottom: 12px; overflow-wrap: anywhere; }
+  .msg.bad { background: var(--bad-bg); color: var(--bad); }
+  .msg.ok { background: var(--ok-bg); color: var(--ok); }
+  .msg.warn { background: var(--warn-bg); color: var(--warn); }
+  .errs { color: var(--bad); font-size: 13px; margin: 6px 0 0; padding-left: 18px; }
+  .warns { color: var(--warn); font-size: 13px; margin: 6px 0 0; padding-left: 18px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
+  .tile { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .tile b { display: block; font-size: 22px; }
+  .meter { height: 8px; background: var(--chip); border-radius: 4px; overflow: hidden; margin-top: 6px; }
+  .meter i { display: block; height: 100%; background: var(--accent); }
+  .meter i.hot { background: var(--bad); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 13px; }
+  td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+  .scroll { overflow-x: auto; }
+  .item { cursor: pointer; }
+  .item:hover { border-color: var(--accent); }
+  .item h3 { margin: 0 0 4px; font-size: 15px; overflow-wrap: anywhere; }
+  dialog { border: 1px solid var(--line); border-radius: 12px; padding: 0; width: min(760px, calc(100vw - 32px));
+    background: var(--card); color: var(--text); max-height: calc(100vh - 32px); }
+  dialog::backdrop { background: rgba(0, 0, 0, .45); }
+  .dlg { padding: 16px; overflow-y: auto; max-height: calc(100vh - 34px); }
+  .dlg h2 { margin: 0 0 6px; font-size: 18px; }
+  .actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; margin-top: 14px; }
+  .count { font-size: 12px; color: var(--muted); text-align: right; }
+  .count.over { color: var(--bad); font-weight: 600; }
+  .center { text-align: center; padding: 40px 16px; }
+  @media (max-width: 600px) {
+    dialog { width: 100vw; max-width: 100vw; height: 100vh; max-height: 100vh; margin: 0; border-radius: 0; }
+    .dlg { max-height: 100vh; }
+    .bar h1 { font-size: 15px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <h1>Quản trị Bot TTHC Đảng</h1>
+    <span class="who" id="who"></span>
+    <button class="btn" id="signout" hidden>Đăng xuất</button>
+  </div>
+  <nav id="tabs" hidden></nav>
+</header>
+<main id="app"><div class="center muted">Đang tải…</div></main>
+<dialog id="dlg"><div class="dlg" id="dlgBody"></div></dialog>
+
+<script type="module">
+// =====================================================================
+// Cấu hình Firebase (công khai theo thiết kế; an toàn dựa vào đăng nhập và quy tắc Firestore).
+// Lấy từ Firebase Console > Project settings > Your apps > Web app.
+// =====================================================================
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyBcu6RrT6mHVnw0dZegN4unuYhj1C7w20Q",
+  authDomain: "zalo-bot-tthc-dang.firebaseapp.com",
+  projectId: "zalo-bot-tthc-dang",
+  appId: "1:921284178915:web:8598615347c0df91da26d6",
+};
+const SDK_VERSION = "13.1.0";
+
+/* LOGIC-START: hàm thuần, không đụng DOM hay Firebase (kiểm thử trong admin/test). */
+const MAX_ANSWER_CHARS = 1500;
+const MAX_HANDOFF_CHARS = 1000;
+const MAX_QUESTIONS = 50;
+const MAX_LINKS = 10;
+const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const STATUSES = ["draft", "approved", "hidden"];
+const CONTENT_FIELDS = ["title", "topic", "questions", "answer", "links", "keywords", "source"];
+const TIMEZONE = "Asia/Ho_Chi_Minh";
+// Giống DEFAULT_CONFIG trong functions/src/config.ts.
+const BOT_DEFAULTS = {
+  ai_enabled: false,
+  reply_enabled: true,
+  confidence_threshold: 0.7,
+  handoff_message: "Câu hỏi của anh/chị đã được ghi nhận, chuyên viên sẽ hỗ trợ sớm.",
+  monthly_message_limit: 3000,
+  monthly_ai_call_limit: 6000,
+  ai_model: "claude-haiku-5-5",
+};
+// USD / 1 triệu token, giống scripts/kb/lib/eval.mjs.
+const PRICES = {
+  "claude-haiku-5-5": { input: 0.1, output: 0.5 },
+  "claude-sonnet-5-5": { input: 2, output: 10 },
+  "claude-opus-5-5": { input: 4, output: 20 },
+};
+const REASON_LABELS = {
+  no_match: "Kho không có",
+  low_confidence: "AI không chắc",
+  ai_error: "Lỗi AI",
+  ai_quota: "Hết hạn mức AI",
+};
+const STATUS_LABELS = { draft: "Nháp", approved: "Đã duyệt", hidden: "Đã ẩn" };
+const PLATFORM_LABEL = { youtube: "YouTube", facebook: "Facebook", drive: "Drive", other: "Liên kết" };
+
+function charLength(s) {
+  return Array.from(s ?? "").length;
+}
+
+function cleanText(v) {
+  if (v === null || v === undefined) return "";
+  return String(v).replace(/\r\n?/g, "\n").normalize("NFC").trim();
+}
+
+function oneLine(v) {
+  return cleanText(v).replace(/\s+/g, " ");
+}
+
+function splitLines(v) {
+  const seen = new Set();
+  const out = [];
+  for (const line of cleanText(v).split("\n")) {
+    const t = line.trim().replace(/\s+/g, " ");
+    if (t && !seen.has(t)) {
+      seen.add(t);
+      out.push(t);
+    }
+  }
+  return out;
+}
+
+function splitKeywords(v) {
+  const seen = new Set();
+  const out = [];
+  for (const k of cleanText(v).split(/[,\n]/)) {
+    const t = k.trim().replace(/\s+/g, " ");
+    if (t && !seen.has(t)) {
+      seen.add(t);
+      out.push(t);
+    }
+  }
+  return out;
+}
+
+function detectPlatform(url) {
+  let host;
+  try {
+    host = new URL(url).hostname.toLowerCase().replace(/^www\.|^m\./, "");
+  } catch {
+    return "other";
+  }
+  if (host === "youtu.be" || host.endsWith("youtube.com")) return "youtube";
+  if (host === "fb.watch" || host.endsWith("facebook.com") || host === "fb.com") return "facebook";
+  if (host === "drive.google.com" || host === "docs.google.com") return "drive";
+  return "other";
+}
+
+/** Mỗi dòng "Nhãn | https://..." hoặc chỉ "https://...". Cùng quy tắc với script kb-import. */
+function parseLinks(v) {
+  const links = [];
+  const errors = [];
+  for (const line of splitLines(v)) {
+    const bar = line.lastIndexOf("|");
+    const label = bar >= 0 ? line.slice(0, bar).trim() : "";
+    const url = (bar >= 0 ? line.slice(bar + 1) : line).trim();
+    let ok = false;
+    try {
+      const u = new URL(url);
+      ok = u.protocol === "https:" && !!u.hostname && !/\s/.test(url);
+    } catch {
+      ok = false;
+    }
+    if (!ok) {
+      errors.push(`Link không hợp lệ (phải là "Nhãn | https://..."): ${line.slice(0, 120)}`);
+      continue;
+    }
+    const platform = detectPlatform(url);
+    links.push({ label: label || PLATFORM_LABEL[platform], url, platform });
+  }
+  return { links, errors };
+}
+
+function formatLinks(links) {
+  return (links ?? []).map((l) => `${l.label} | ${l.url}`).join("\n");
+}
+
+/** Bỏ dấu, chữ thường (tìm kiếm, gợi ý slug). */
+function unaccent(s) {
+  return String(s ?? "")
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/đ/g, "d")
+    .replace(/Đ/g, "D")
+    .toLowerCase();
+}
+
+function suggestSlug(title, max = 60) {
+  let s = unaccent(title).replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  if (s.length > max) {
+    s = s.slice(0, max);
+    const cut = s.lastIndexOf("-");
+    if (cut > 20) s = s.slice(0, cut);
+    s = s.replace(/-+$/g, "");
+  }
+  return s;
+}
+
+/** Mục vào form sửa (chuỗi nhiều dòng). */
+function itemToForm(slug, d) {
+  return {
+    slug: slug ?? "",
+    title: d?.title ?? "",
+    topic: d?.topic ?? "",
+    questions: (d?.questions ?? []).join("\n"),
+    answer: d?.answer ?? "",
+    links: formatLinks(d?.links),
+    keywords: (d?.keywords ?? []).join(", "),
+    source: d?.source ?? "",
+    status: d?.status ?? "draft",
+  };
+}
+
+/** Lý do không duyệt được; cùng điều kiện với script kb-approve. */
+function approveProblems(item) {
+  const problems = [];
+  if (!item.answer) problems.push("thiếu nội dung trả lời");
+  if (!Array.isArray(item.questions) || item.questions.length < 2) problems.push("cần ít nhất 2 cách hỏi");
+  if (!item.source) problems.push("thiếu nguồn");
+  return problems;
+}
+
+/**
+ * Kiểm tra form mục kho. Cùng quy tắc với kb-import (validate.mjs).
+ * @returns {{ slug: string, item: object|null, errors: string[], warnings: string[] }}
+ */
+function validateItemForm(f, { isNew = false, existingSlugs = new Set() } = {}) {
+  const errors = [];
+  const warnings = [];
+  const slug = cleanText(f.slug);
+  if (isNew) {
+    if (!slug) errors.push("Mã mục (slug) trống");
+    else if (!SLUG_PATTERN.test(slug)) errors.push("Mã mục chỉ gồm chữ thường không dấu, số, nối bằng gạch ngang");
+    else if (slug.length > 80) errors.push("Mã mục dài quá 80 ký tự");
+    else if (existingSlugs.has(slug)) errors.push(`Mã mục "${slug}" đã có trong kho`);
+  }
+  const title = oneLine(f.title);
+  if (!title) errors.push("Tiêu đề trống");
+  else if (charLength(title) > 200) errors.push("Tiêu đề dài quá 200 ký tự");
+  const topic = oneLine(f.topic);
+  if (charLength(topic) > 100) errors.push("Nhóm dài quá 100 ký tự");
+  const answer = cleanText(f.answer);
+  const answerLen = charLength(answer);
+  if (!answer) errors.push("Nội dung trả lời trống");
+  else if (answerLen > MAX_ANSWER_CHARS) errors.push(`Nội dung trả lời dài ${answerLen} ký tự, tối đa ${MAX_ANSWER_CHARS}`);
+  const status = STATUSES.includes(f.status) ? f.status : "draft";
+  const questions = splitLines(f.questions);
+  if (questions.length > MAX_QUESTIONS) errors.push(`Tối đa ${MAX_QUESTIONS} cách hỏi`);
+  const source = oneLine(f.source);
+  if (charLength(source) > 500) errors.push("Nguồn dài quá 500 ký tự");
+  const { links, errors: linkErrors } = parseLinks(f.links);
+  errors.push(...linkErrors);
+  if (links.length > MAX_LINKS) errors.push(`Tối đa ${MAX_LINKS} link`);
+  const keywords = splitKeywords(f.keywords);
+  if (keywords.length > 50) errors.push("Tối đa 50 từ khóa");
+  const item = { title, topic, questions, answer, links, keywords, source, status };
+  if (status === "approved") {
+    for (const p of approveProblems(item)) errors.push(`Không duyệt được: ${p}`);
+  } else {
+    if (questions.length < 2) warnings.push(`Mới có ${questions.length} cách hỏi (nên 3-8; cần ít nhất 2 để duyệt)`);
+    if (!source) warnings.push("Chưa có nguồn (bắt buộc khi duyệt)");
+  }
+  return { slug, item: errors.length ? null : item, errors, warnings };
+}
+
+function diffContent(a, b) {
+  return CONTENT_FIELDS.filter((k) => JSON.stringify(a?.[k] ?? null) !== JSON.stringify(b?.[k] ?? null));
+}
+
+/** Lưu thay đổi này có ảnh hưởng ngay đến câu trả lời của bot không (cần xác nhận rõ). */
+function needsLiveConfirm(old, item) {
+  if (item.status === "approved" && old?.status !== "approved") return true;
+  return old?.status === "approved" && item.status === "approved" && diffContent(old, item).length > 0;
+}
+
+/**
+ * Dữ liệu ghi Firestore cho một lần lưu, khớp quy tắc trong firestore.rules.
+ * `now` là FieldValue serverTimestamp() (hoặc giá trị giả khi kiểm thử).
+ * Trả null khi không có gì thay đổi.
+ */
+function buildItemWrite(old, item, email, now) {
+  const approved = item.status === "approved";
+  if (!old) {
+    return {
+      title: item.title,
+      topic: item.topic,
+      questions: item.questions,
+      answer: item.answer,
+      links: item.links,
+      keywords: item.keywords,
+      source: item.source,
+      status: item.status,
+      version: 1,
+      steps: [],
+      image_urls: [],
+      hit_count: 0,
+      last_hit_at: null,
+      created_at: now,
+      updated_at: now,
+      updated_by: email,
+      approved_at: approved ? now : null,
+      approved_by: approved ? email : null,
+    };
+  }
+  const changedFields = diffContent(old, item);
+  const statusChanged = old.status !== item.status;
+  if (!changedFields.length && !statusChanged) return null;
+  const data = {};
+  for (const k of changedFields) data[k] = item[k];
+  if (statusChanged) data.status = item.status;
+  if (changedFields.length) data.version = (Number.isInteger(old.version) ? old.version : 0) + 1;
+  data.updated_at = now;
+  data.updated_by = email;
+  if (approved) {
+    data.approved_at = now;
+    data.approved_by = email;
+  }
+  return data;
+}
+
+/** Thêm câu hỏi mới vào danh sách cách hỏi của mục (bỏ câu trùng, giữ thứ tự). */
+function mergeQuestions(existing, added) {
+  const out = [...(existing ?? [])];
+  const seen = new Set(out.map((q) => unaccent(q).replace(/\s+/g, " ").trim()));
+  for (const q of added) {
+    const t = oneLine(q);
+    const k = unaccent(t);
+    if (t && !seen.has(k)) {
+      seen.add(k);
+      out.push(t);
+    }
+  }
+  return out;
+}
+
+/** config/main → form Cài đặt (trường thiếu dùng mặc định của bot). */
+function settingsFromConfig(raw) {
+  const r = raw ?? {};
+  const labels = r.chat_labels && typeof r.chat_labels === "object" ? r.chat_labels : {};
+  const ids = Array.isArray(r.allowed_chat_ids) ? r.allowed_chat_ids.filter((x) => typeof x === "string") : [];
+  return {
+    ai_enabled: typeof r.ai_enabled === "boolean" ? r.ai_enabled : BOT_DEFAULTS.ai_enabled,
+    reply_enabled: typeof r.reply_enabled === "boolean" ? r.reply_enabled : BOT_DEFAULTS.reply_enabled,
+    confidence_threshold: String(
+      typeof r.confidence_threshold === "number" ? r.confidence_threshold : BOT_DEFAULTS.confidence_threshold,
+    ),
+    handoff_message: typeof r.handoff_message === "string" && r.handoff_message.trim()
+      ? r.handoff_message
+      : BOT_DEFAULTS.handoff_message,
+    chats: ids.map((id) => ({ id, label: typeof labels[id] === "string" ? labels[id] : "" })),
+  };
+}
+
+/** Kiểm tra form Cài đặt → dữ liệu ghi config/main (chỉ các trường được phép). */
+function validateSettings(f) {
+  const errors = [];
+  const threshold = Number(String(f.confidence_threshold).replace(",", "."));
+  if (String(f.confidence_threshold).trim() === "" || !Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
+    errors.push("Ngưỡng tin cậy phải là số từ 0 đến 1");
+  }
+  const handoff = cleanText(f.handoff_message);
+  if (!handoff) errors.push("Tin chuyển ca trống");
+  else if (charLength(handoff) > MAX_HANDOFF_CHARS) errors.push(`Tin chuyển ca tối đa ${MAX_HANDOFF_CHARS} ký tự`);
+  const ids = [];
+  const labels = {};
+  for (const c of f.chats ?? []) {
+    const id = cleanText(c.id);
+    const label = oneLine(c.label);
+    if (!id && !label) continue;
+    if (!id) {
+      errors.push(`Nhãn "${label}" chưa có mã nhóm`);
+      continue;
+    }
+    if (/\s/.test(id) || id.length > 100) {
+      errors.push(`Mã nhóm "${id.slice(0, 40)}" không hợp lệ (không chứa khoảng trắng, tối đa 100 ký tự)`);
+      continue;
+    }
+    if (ids.includes(id)) {
+      errors.push(`Mã nhóm "${id.slice(0, 40)}" bị trùng`);
+      continue;
+    }
+    if (charLength(label) > 100) errors.push("Nhãn nhóm tối đa 100 ký tự");
+    ids.push(id);
+    if (label) labels[id] = label;
+  }
+  if (ids.length > 50) errors.push("Tối đa 50 nhóm");
+  if (errors.length) return { data: null, errors };
+  return {
+    data: {
+      ai_enabled: !!f.ai_enabled,
+      reply_enabled: !!f.reply_enabled,
+      confidence_threshold: threshold,
+      handoff_message: handoff,
+      allowed_chat_ids: ids,
+      chat_labels: labels,
+    },
+    errors,
+  };
+}
+
+function dayKey(date, timeZone = TIMEZONE) {
+  return new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
+}
+
+function monthKey(date, timeZone = TIMEZONE) {
+  return dayKey(date, timeZone).slice(0, 7);
+}
+
+/** n ngày gần nhất theo giờ Việt Nam, cũ → mới. */
+function lastNDays(n, now = new Date()) {
+  const out = [];
+  for (let i = n - 1; i >= 0; i--) out.push(dayKey(new Date(now.getTime() - i * 86400000)));
+  return out;
+}
+
+/**
+ * @param {Array<{id: string, data: object}>} docs  stats_daily
+ * @param {string[]} days
+ */
+function summarizeStats(docs, days) {
+  const byId = new Map(docs.map((d) => [d.id, d.data ?? {}]));
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  const totals = { questions: 0, answered: 0, handoff: 0, ai_errors: 0 };
+  const hits = new Map();
+  const rows = days.map((day) => {
+    const d = byId.get(day) ?? {};
+    const row = { day, questions: num(d.questions), answered: num(d.answered), handoff: num(d.handoff), ai_errors: num(d.ai_errors) };
+    for (const k of Object.keys(totals)) totals[k] += row[k];
+    for (const [slug, v] of Object.entries(d.item_hits ?? {})) hits.set(slug, (hits.get(slug) ?? 0) + num(v));
+    return row;
+  });
+  const topItems = [...hits.entries()]
+    .map(([slug, count]) => ({ slug, count }))
+    .filter((x) => x.count > 0)
+    .sort((a, b) => b.count - a.count || a.slug.localeCompare(b.slug))
+    .slice(0, 10);
+  const autoRate = totals.questions ? totals.answered / totals.questions : null;
+  return { rows, totals, topItems, autoRate };
+}
+
+function estimateCost(model, inputTokens, outputTokens) {
+  const p = PRICES[model];
+  if (!p) return null;
+  return ((inputTokens || 0) * p.input + (outputTokens || 0) * p.output) / 1e6;
+}
+
+function ratio(a, b) {
+  if (!b) return 0;
+  return Math.max(0, Math.min(1, a / b));
+}
+
+/** Lọc kho theo ô tìm kiếm (không dấu), trạng thái, nhóm. */
+function filterItems(entries, { q = "", status = "", topic = "" } = {}) {
+  const needle = unaccent(q).trim();
+  return entries
+    .filter(([slug, d]) => {
+      if (status && d.status !== status) return false;
+      if (topic && (d.topic ?? "") !== topic) return false;
+      if (!needle) return true;
+      const hay = unaccent([slug, d.title, d.topic, ...(d.questions ?? []), ...(d.keywords ?? [])].join("\n"));
+      return hay.includes(needle);
+    })
+    .sort(([a, x], [b, y]) => (x.title ?? a).localeCompare(y.title ?? b, "vi"));
+}
+/* LOGIC-END */
+
+// =====================================================================
+// Giao diện
+// =====================================================================
+const base = `https://www.gstatic.com/firebasejs/${SDK_VERSION}`;
+const [appMod, authMod, fsMod] = await Promise.all([
+  import(`${base}/firebase-app.js`),
+  import(`${base}/firebase-auth.js`),
+  import(`${base}/firebase-firestore.js`),
+]);
+const { initializeApp } = appMod;
+const {
+  getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, signInWithCredential, signOut, onAuthStateChanged,
+  connectAuthEmulator,
+} = authMod;
+const {
+  getFirestore, connectFirestoreEmulator, collection, doc, getDoc, getDocs, query, where, orderBy, limit,
+  documentId, serverTimestamp, runTransaction, writeBatch, updateDoc,
+} = fsMod;
+
+const $app = document.getElementById("app");
+const $who = document.getElementById("who");
+const $signout = document.getElementById("signout");
+const $tabs = document.getElementById("tabs");
+const $dlg = document.getElementById("dlg");
+const $dlgBody = document.getElementById("dlgBody");
+
+/** Tạo phần tử. Chuỗi luôn đi qua textContent (không dùng innerHTML: câu hỏi đến từ người dùng Zalo). */
+function h(tag, attrs = {}, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs ?? {})) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "class") el.className = v;
+    else if (k === "value") el.value = v;
+    else if (k === "checked") el.checked = !!v;
+    else el.setAttribute(k, v === true ? "" : String(v));
+  }
+  for (const c of children.flat(Infinity)) {
+    if (c === null || c === undefined || c === false) continue;
+    el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return el;
+}
+
+/** Bỏ null/false, làm phẳng mảng (replaceChildren tự đổi chúng thành chữ "null", "[object …]"). */
+function nodes(...items) {
+  return items.flat(Infinity).filter((n) => n !== null && n !== undefined && n !== false);
+}
+
+function show(...items) {
+  $app.replaceChildren(...nodes(items));
+}
+
+function msg(kind, text) {
+  return h("div", { class: `msg ${kind}` }, text);
+}
+
+function list(cls, items) {
+  return items.length ? h("ul", { class: cls }, items.map((t) => h("li", {}, t))) : null;
+}
+
+function errText(e) {
+  const code = e?.code ?? "";
+  if (code === "permission-denied" || code === "firestore/permission-denied") {
+    return "Không có quyền thực hiện (kiểm tra tài liệu admins và quy tắc Firestore đã triển khai chưa).";
+  }
+  if (code === "failed-precondition" && /index/i.test(e?.message ?? "")) {
+    return "Thiếu chỉ mục Firestore. Chạy: firebase deploy --only firestore:indexes rồi chờ vài phút.";
+  }
+  if (code === "unavailable") return "Mất kết nối tới Firestore. Thử lại sau.";
+  return e?.message ? String(e.message) : String(e);
+}
+
+const fmtTime = new Intl.DateTimeFormat("vi-VN", { timeZone: TIMEZONE, dateStyle: "short", timeStyle: "short" });
+function when(ts) {
+  try {
+    return ts?.toDate ? fmtTime.format(ts.toDate()) : "";
+  } catch {
+    return "";
+  }
+}
+const fmtNum = new Intl.NumberFormat("vi-VN");
+const pct = (v) => (v === null ? "-" : `${Math.round(v * 100)}%`);
+
+function openDialog(...items) {
+  $dlgBody.replaceChildren(...nodes(items));
+  if (!$dlg.open) $dlg.showModal();
+}
+function closeDialog() {
+  if ($dlg.open) $dlg.close();
+}
+
+// ---------- Khởi tạo Firebase ----------
+const params = new URLSearchParams(location.search);
+const emulator = params.has("emulator") && ["localhost", "127.0.0.1"].includes(location.hostname);
+if (!emulator && (!FIREBASE_CONFIG.apiKey || !FIREBASE_CONFIG.appId)) {
+  show(h("div", { class: "card" },
+    h("h2", {}, "Chưa có cấu hình Firebase"),
+    h("p", {}, "Điền apiKey và appId vào FIREBASE_CONFIG ở đầu tệp (Firebase Console > Project settings > Your apps > Web app)."),
+  ));
+  throw new Error("missing firebase config");
+}
+// Emulator dùng dự án demo (giống admin/package.json), không bao giờ chạm dữ liệu thật.
+const app = initializeApp(emulator
+  ? { apiKey: "emulator-key", appId: "emulator", projectId: "demo-zalo-bot", authDomain: "demo-zalo-bot.firebaseapp.com" }
+  : FIREBASE_CONFIG);
+const auth = getAuth(app);
+const db = getFirestore(app);
+if (emulator) {
+  connectAuthEmulator(auth, "http://127.0.0.1:9099", { disableWarnings: true });
+  connectFirestoreEmulator(db, "127.0.0.1", 8080);
+}
+
+const state = { user: null, tab: "unanswered", kb: new Map() };
+
+async function loadKb() {
+  const snap = await getDocs(collection(db, "kb_items"));
+  state.kb = new Map(snap.docs.map((d) => [d.id, d.data()]));
+  return state.kb;
+}
+
+const TABS = [
+  ["unanswered", "Câu chưa trả lời"],
+  ["kb", "Kho tri thức"],
+  ["stats", "Thống kê"],
+  ["settings", "Cài đặt"],
+];
+
+function renderTabs() {
+  $tabs.hidden = false;
+  $tabs.replaceChildren(...TABS.map(([id, label]) =>
+    h("button", { class: state.tab === id ? "on" : "", onclick: () => go(id) }, label)));
+}
+
+async function go(tab) {
+  state.tab = tab;
+  renderTabs();
+  show(h("div", { class: "center muted" }, "Đang tải…"));
+  try {
+    if (tab === "unanswered") await renderUnanswered();
+    else if (tab === "kb") await renderKb();
+    else if (tab === "stats") await renderStats();
+    else await renderSettings();
+  } catch (e) {
+    console.error(e);
+    show(msg("bad", errText(e)));
+  }
+}
+
+// ---------- Đăng nhập ----------
+$signout.addEventListener("click", () => signOut(auth));
+
+function renderLogin(error) {
+  $tabs.hidden = true;
+  $signout.hidden = true;
+  $who.textContent = "";
+  show(h("div", { class: "card center" },
+    error ? msg("bad", error) : null,
+    h("p", {}, "Đăng nhập bằng tài khoản Google đã được cấp quyền quản trị."),
+    h("button", { class: "btn primary", onclick: login }, "Đăng nhập bằng Google"),
+    emulator ? h("p", {}, h("button", { class: "btn", onclick: emulatorLogin }, "Đăng nhập tài khoản giả (emulator)")) : null,
+  ));
+}
+
+/** Chỉ có ở chế độ emulator (localhost + ?emulator): tài khoản Google giả, không cần popup. */
+async function emulatorLogin() {
+  const cred = GoogleAuthProvider.credential(
+    JSON.stringify({ sub: "emulator-admin", email: "admin@example.com", email_verified: true }));
+  try {
+    await signInWithCredential(auth, cred);
+  } catch (e) {
+    renderLogin(errText(e));
+  }
+}
+
+async function login() {
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: "select_account" });
+  try {
+    await signInWithPopup(auth, provider);
+  } catch (e) {
+    if (e?.code === "auth/popup-blocked" || e?.code === "auth/operation-not-supported-in-this-environment") {
+      await signInWithRedirect(auth, provider);
+    } else if (e?.code !== "auth/popup-closed-by-user" && e?.code !== "auth/cancelled-popup-request") {
+      renderLogin(errText(e));
+    }
+  }
+}
+
+onAuthStateChanged(auth, async (user) => {
+  state.user = user;
+  if (!user) return renderLogin();
+  $who.textContent = user.email ?? "";
+  $signout.hidden = false;
+  let isAdmin = false;
+  try {
+    isAdmin = (await getDoc(doc(db, "admins", user.uid))).exists();
+  } catch (e) {
+    console.error(e);
+  }
+  if (!isAdmin) {
+    $tabs.hidden = true;
+    show(h("div", { class: "card" },
+      h("h2", {}, "Tài khoản chưa có quyền quản trị"),
+      h("p", {}, "Nếu đây là tài khoản của bạn: mở Firestore Console, tạo collection ", h("code", {}, "admins"),
+        ", tài liệu có mã đúng bằng UID dưới đây (trường tùy ý, ví dụ email), rồi tải lại trang."),
+      h("p", {}, "UID: ", h("code", {}, user.uid)),
+    ));
+    return;
+  }
+  go(state.tab);
+});
+
+// ---------- Màn: Câu chưa trả lời ----------
+async function renderUnanswered(notice) {
+  const [snap] = await Promise.all([
+    getDocs(query(collection(db, "unanswered"), where("status", "==", "new"),
+      orderBy("count", "desc"), orderBy("last_asked_at", "desc"), limit(100))),
+    loadKb(),
+  ]);
+  const cards = snap.docs.map((d) => unansweredCard(d.id, d.data()));
+  show(
+    notice ?? null,
+    h("p", { class: "muted" },
+      `${snap.size} câu đang chờ xử lý${snap.size === 100 ? " (hiện 100 câu hỏi nhiều nhất)" : ""}. `,
+      "Câu đã có đáp án sẽ được bot dùng sau tối đa khoảng 1 phút khi mục ở trạng thái Đã duyệt."),
+    cards.length ? cards : h("div", { class: "card center muted" }, "Không còn câu nào chưa trả lời."),
+  );
+}
+
+function unansweredCard(id, u) {
+  const samples = (u.samples ?? []).filter((s) => typeof s === "string");
+  const guess = u.best_guess_slug ? state.kb.get(u.best_guess_slug) : null;
+  return h("div", { class: "card" },
+    samples.map((s) => h("p", { class: "sample" }, `“${s}”`)),
+    h("div", { class: "row muted", style: "margin-top:6px" },
+      h("span", { class: "chip" }, `Hỏi ${fmtNum.format(u.count ?? 0)} lần`),
+      h("span", {}, `Lần cuối: ${when(u.last_asked_at)}`),
+      h("span", {}, `Lý do: ${REASON_LABELS[u.reason] ?? u.reason ?? "-"}`),
+    ),
+    u.best_guess_slug
+      ? h("p", { class: "muted", style: "margin:6px 0 0" },
+        `AI đoán gần nhất: ${guess?.title ?? u.best_guess_slug} (${u.best_guess_slug})`,
+        typeof u.best_guess_confidence === "number" ? `, độ tin cậy ${u.best_guess_confidence.toFixed(2)}` : "")
+      : null,
+    h("div", { class: "actions" },
+      h("button", { class: "btn danger", onclick: () => ignoreUnanswered(id) }, "Bỏ qua"),
+      h("button", { class: "btn", onclick: () => attachDialog(id, u, samples) }, "Gắn vào mục có sẵn"),
+      h("button", { class: "btn primary", onclick: () => newFromUnanswered(id, samples) }, "Soạn đáp án mới"),
+    ),
+  );
+}
+
+async function ignoreUnanswered(id) {
+  if (!confirm("Bỏ qua câu này? Nếu có người hỏi lại mà bot vẫn chưa trả lời được, câu sẽ hiện lại.")) return;
+  try {
+    await updateDoc(doc(db, "unanswered", id), { status: "ignored", handled_by: state.user.email });
+    await renderUnanswered(msg("ok", "Đã bỏ qua."));
+  } catch (e) {
+    alert(errText(e));
+  }
+}
+
+function newFromUnanswered(id, samples) {
+  const title = (samples[0] ?? "").slice(0, 200);
+  const form = { ...itemToForm("", null), slug: suggestSlug(title), title, questions: samples.join("\n") };
+  itemEditor({
+    slug: null,
+    form,
+    heading: "Soạn đáp án mới từ câu chưa trả lời",
+    unansweredId: id,
+    onDone: () => renderUnanswered(msg("ok", "Đã lưu mục mới và đánh dấu câu là đã có đáp án.")),
+  });
+}
+
+function attachDialog(id, u, samples) {
+  const entries = [...state.kb.entries()].filter(([, d]) => d.status !== "hidden")
+    .sort(([a, x], [b, y]) => (x.title ?? a).localeCompare(y.title ?? b, "vi"));
+  if (!entries.length) return alert("Kho chưa có mục nào để gắn.");
+  const pick = h("select", {},
+    entries.map(([slug, d]) => h("option", { value: slug }, `${d.title ?? slug} (${STATUS_LABELS[d.status] ?? d.status})`)));
+  pick.value = u.best_guess_slug && state.kb.has(u.best_guess_slug) ? u.best_guess_slug : entries[0][0];
+  const boxes = samples.map((s) => h("input", { type: "checkbox", checked: true }));
+  const confirmBox = h("input", { type: "checkbox" });
+  const confirmRow = h("label", { class: "row" }, confirmBox,
+    "Mục này đang được bot dùng. Tôi xác nhận thêm cách hỏi (bot sẽ dùng mục cho các câu này).");
+  const info = h("p", { class: "muted" });
+  const errBox = h("div");
+  const refresh = () => {
+    const d = state.kb.get(pick.value);
+    confirmRow.hidden = d?.status !== "approved";
+    info.textContent = d?.status === "approved"
+      ? `Mục đã duyệt, hiện có ${d.questions?.length ?? 0} cách hỏi.`
+      : `Mục đang ở trạng thái ${STATUS_LABELS[d?.status] ?? d?.status}: bot chưa dùng cho tới khi bạn duyệt.`;
+  };
+  pick.addEventListener("change", refresh);
+  refresh();
+  const save = async () => {
+    const slug = pick.value;
+    const old = state.kb.get(slug);
+    const added = samples.filter((_, i) => boxes[i].checked);
+    errBox.replaceChildren();
+    if (!added.length) return errBox.replaceChildren(msg("bad", "Chọn ít nhất một câu."));
+    if (old.status === "approved" && !confirmBox.checked) {
+      return errBox.replaceChildren(msg("bad", "Đánh dấu ô xác nhận trước khi lưu mục đã duyệt."));
+    }
+    const questions = mergeQuestions(old.questions, added);
+    if (questions.length > MAX_QUESTIONS) return errBox.replaceChildren(msg("bad", `Mục đã đủ ${MAX_QUESTIONS} cách hỏi.`));
+    try {
+      await saveItem(slug, old, { ...pickContent(old), questions, status: old.status }, id);
+      closeDialog();
+      await renderUnanswered(msg("ok", `Đã gắn vào mục "${old.title ?? slug}".`));
+    } catch (e) {
+      errBox.replaceChildren(msg("bad", errText(e)));
+    }
+  };
+  openDialog(
+    h("h2", {}, "Gắn vào mục có sẵn"),
+    h("p", { class: "muted" }, "Các câu được chọn sẽ thêm vào danh sách cách hỏi của mục."),
+    h("label", { class: "f" }, "Mục"),
+    pick,
+    info,
+    h("label", { class: "f" }, "Câu thêm vào"),
+    samples.map((s, i) => h("label", { class: "row", style: "margin:4px 0" }, boxes[i], h("span", { class: "sample grow" }, s))),
+    confirmRow,
+    errBox,
+    h("div", { class: "actions" },
+      h("button", { class: "btn", onclick: closeDialog }, "Hủy"),
+      h("button", { class: "btn primary", onclick: save }, "Lưu"),
+    ),
+  );
+}
+
+function pickContent(d) {
+  return {
+    title: d.title ?? "",
+    topic: d.topic ?? "",
+    questions: d.questions ?? [],
+    answer: d.answer ?? "",
+    links: d.links ?? [],
+    keywords: d.keywords ?? [],
+    source: d.source ?? "",
+  };
+}
+
+/**
+ * Ghi một mục (tạo hoặc sửa) trong transaction: từ chối nếu mục vừa bị sửa ở nơi khác
+ * (version khác lúc mở) hoặc slug mới đã tồn tại. Có `unansweredId` thì đánh dấu câu là đã có đáp án.
+ */
+async function saveItem(slug, old, item, unansweredId) {
+  const email = state.user.email;
+  const ref = doc(db, "kb_items", slug);
+  await runTransaction(db, async (tx) => {
+    const cur = await tx.get(ref);
+    if (!old && cur.exists()) throw new Error(`Mã mục "${slug}" vừa được tạo ở nơi khác. Chọn mã khác.`);
+    if (old && !cur.exists()) throw new Error("Mục không còn trong kho. Tải lại trang.");
+    if (old && cur.data().version !== old.version) {
+      throw new Error("Mục vừa được sửa ở nơi khác (script hoặc người khác). Đóng và mở lại để xem bản mới.");
+    }
+    const data = buildItemWrite(old ? cur.data() : null, item, email, serverTimestamp());
+    if (data) {
+      if (old) tx.update(ref, data);
+      else tx.set(ref, data);
+    }
+    if (unansweredId) {
+      tx.update(doc(db, "unanswered", unansweredId), {
+        status: "answered", answered_slug: slug, answered_at: serverTimestamp(), handled_by: email,
+      });
+    }
+  });
+}
+
+// ---------- Form sửa mục (dùng chung) ----------
+function itemEditor({ slug, form, heading, unansweredId, onDone }) {
+  const isNew = !slug;
+  const old = isNew ? null : state.kb.get(slug);
+  const f = { ...form };
+  const field = (key, label, hint, el) => {
+    el.value = f[key];
+    el.addEventListener("input", () => {
+      f[key] = el.value;
+      check();
+    });
+    return [h("label", { class: "f" }, label, hint ? h("span", { class: "hint" }, ` ${hint}`) : null), el];
+  };
+  const slugInput = h("input", { disabled: !isNew, autocomplete: "off" });
+  const titleInput = h("input", { autocomplete: "off" });
+  if (isNew) {
+    // Gợi ý mã mục theo tiêu đề cho tới khi người dùng tự sửa mã.
+    let auto = f.slug === suggestSlug(f.title);
+    slugInput.addEventListener("input", () => (auto = false));
+    titleInput.addEventListener("input", () => {
+      if (auto) {
+        f.slug = slugInput.value = suggestSlug(titleInput.value);
+      }
+    });
+  }
+  const answerInput = h("textarea", { rows: 8 });
+  const counter = h("div", { class: "count" });
+  const statusSelect = h("select", {}, STATUSES.map((s) => h("option", { value: s }, STATUS_LABELS[s])));
+  const confirmBox = h("input", { type: "checkbox" });
+  const confirmRow = h("label", { class: "row", style: "margin-top:10px" }, confirmBox,
+    "Tôi xác nhận: sau khi lưu, bot sẽ gửi nguyên văn nội dung này cho người hỏi.");
+  const errList = h("div");
+  const saveBtn = h("button", { class: "btn primary" }, "Lưu");
+  const existing = new Set(state.kb.keys());
+
+  function check() {
+    const len = charLength(cleanText(f.answer));
+    counter.textContent = `${len}/${MAX_ANSWER_CHARS} ký tự`;
+    counter.className = len > MAX_ANSWER_CHARS ? "count over" : "count";
+    const res = validateItemForm(f, { isNew, existingSlugs: existing });
+    confirmRow.hidden = !(res.item && needsLiveConfirm(old, res.item));
+    errList.replaceChildren(...[list("errs", res.errors), list("warns", res.warnings)].filter(Boolean));
+    saveBtn.disabled = !res.item;
+    return res;
+  }
+
+  saveBtn.addEventListener("click", async () => {
+    const res = check();
+    if (!res.item) return;
+    if (needsLiveConfirm(old, res.item) && !confirmBox.checked) {
+      return errList.replaceChildren(msg("bad", "Đánh dấu ô xác nhận trước khi lưu mục đã duyệt."));
+    }
+    if (old && !buildItemWrite(old, res.item, "", null) && !unansweredId) {
+      closeDialog();
+      return;
+    }
+    saveBtn.disabled = true;
+    try {
+      await saveItem(isNew ? res.slug : slug, old, res.item, unansweredId);
+      closeDialog();
+      await onDone?.();
+    } catch (e) {
+      errList.replaceChildren(msg("bad", errText(e)));
+      saveBtn.disabled = false;
+    }
+  });
+
+  const meta = old
+    ? h("p", { class: "muted" },
+      `Phiên bản ${old.version ?? "-"} · Bot đã dùng ${fmtNum.format(old.hit_count ?? 0)} lần`,
+      old.last_hit_at ? ` (lần cuối ${when(old.last_hit_at)})` : "",
+      old.approved_by ? ` · Duyệt bởi ${old.approved_by}` : "",
+      old.updated_at ? ` · Sửa ${when(old.updated_at)}` : "")
+    : null;
+
+  openDialog(
+    h("h2", {}, heading ?? (isNew ? "Thêm mục mới" : `Sửa mục: ${old?.title ?? slug}`)),
+    meta,
+    field("slug", "Mã mục (slug)", isNew ? "chữ thường không dấu, gạch ngang; không đổi được sau khi tạo" : "", slugInput),
+    field("title", "Tiêu đề", "", titleInput),
+    field("topic", "Nhóm", "", h("input", { autocomplete: "off" })),
+    field("questions", "Các cách hỏi", "mỗi dòng một cách; AI dựa vào tiêu đề và phần này để chọn mục", h("textarea", { rows: 5 })),
+    field("answer", "Nội dung trả lời", "bot gửi nguyên văn", answerInput),
+    counter,
+    field("links", "Link", 'mỗi dòng "Nhãn | https://..."', h("textarea", { rows: 3 })),
+    field("keywords", "Từ khóa", "cách nhau bằng dấu phẩy", h("input", { autocomplete: "off" })),
+    field("source", "Nguồn", "bắt buộc khi duyệt", h("input", { autocomplete: "off" })),
+    field("status", "Trạng thái", "chỉ mục Đã duyệt mới được bot dùng; không xóa mục, dùng Đã ẩn", statusSelect),
+    confirmRow,
+    errList,
+    h("div", { class: "actions" },
+      h("button", { class: "btn", onclick: closeDialog }, "Hủy"),
+      saveBtn,
+    ),
+  );
+  check();
+}
+
+// ---------- Màn: Kho tri thức ----------
+const kbFilter = { q: "", status: "", topic: "" };
+
+async function renderKb(notice) {
+  await loadKb();
+  const entries = [...state.kb.entries()];
+  const topics = [...new Set(entries.map(([, d]) => d.topic).filter(Boolean))].sort((a, b) => a.localeCompare(b, "vi"));
+  const counts = Object.fromEntries(STATUSES.map((s) => [s, entries.filter(([, d]) => d.status === s).length]));
+  const listBox = h("div");
+  const draw = () => {
+    const rows = filterItems(entries, kbFilter);
+    listBox.replaceChildren(
+      h("p", { class: "muted" }, `${rows.length}/${entries.length} mục`),
+      ...rows.map(([slug, d]) => h("div", {
+        class: "card item",
+        onclick: () => itemEditor({ slug, form: itemToForm(slug, d), onDone: () => renderKb(msg("ok", "Đã lưu.")) }),
+      },
+      h("h3", {}, d.title ?? slug),
+      h("div", { class: "row muted" },
+        h("span", { class: `chip ${d.status}` }, STATUS_LABELS[d.status] ?? d.status),
+        d.topic ? h("span", { class: "chip" }, d.topic) : null,
+        h("span", {}, slug),
+        h("span", {}, `${d.questions?.length ?? 0} cách hỏi`),
+        h("span", {}, `bot dùng ${fmtNum.format(d.hit_count ?? 0)} lần`),
+      ))),
+    );
+  };
+  const search = h("input", { placeholder: "Tìm theo tiêu đề, cách hỏi, từ khóa…", value: kbFilter.q, class: "grow" });
+  search.addEventListener("input", () => {
+    kbFilter.q = search.value;
+    draw();
+  });
+  const statusSel = h("select", { style: "width:auto" }, h("option", { value: "" }, "Mọi trạng thái"),
+    STATUSES.map((s) => h("option", { value: s }, `${STATUS_LABELS[s]} (${counts[s]})`)));
+  statusSel.value = kbFilter.status;
+  statusSel.addEventListener("change", () => {
+    kbFilter.status = statusSel.value;
+    draw();
+  });
+  const topicSel = h("select", { style: "width:auto" }, h("option", { value: "" }, "Mọi nhóm"),
+    topics.map((t) => h("option", { value: t }, t)));
+  topicSel.value = topics.includes(kbFilter.topic) ? kbFilter.topic : "";
+  topicSel.addEventListener("change", () => {
+    kbFilter.topic = topicSel.value;
+    draw();
+  });
+  show(
+    notice ?? null,
+    h("div", { class: "row", style: "margin-bottom:12px" },
+      search, statusSel, topicSel,
+      h("button", {
+        class: "btn primary",
+        onclick: () => itemEditor({ slug: null, form: itemToForm("", null), onDone: () => renderKb(msg("ok", "Đã thêm mục.")) }),
+      }, "+ Thêm mục"),
+    ),
+    listBox,
+  );
+  draw();
+}
+
+// ---------- Màn: Thống kê ----------
+let statsDays = 30;
+
+async function renderStats() {
+  const now = new Date();
+  const days = lastNDays(statsDays, now);
+  const month = monthKey(now);
+  const [statSnap, usageSnap, cfgSnap] = await Promise.all([
+    getDocs(query(collection(db, "stats_daily"), where(documentId(), ">=", days[0]), where(documentId(), "<=", days.at(-1)))),
+    getDoc(doc(db, "usage", month)),
+    getDoc(doc(db, "config", "main")),
+    loadKb(),
+  ]);
+  const s = summarizeStats(statSnap.docs.map((d) => ({ id: d.id, data: d.data() })), days);
+  const usage = usageSnap.exists() ? usageSnap.data() : {};
+  const cfg = cfgSnap.exists() ? cfgSnap.data() : {};
+  const msgLimit = typeof cfg.monthly_message_limit === "number" ? cfg.monthly_message_limit : BOT_DEFAULTS.monthly_message_limit;
+  const aiLimit = typeof cfg.monthly_ai_call_limit === "number" ? cfg.monthly_ai_call_limit : BOT_DEFAULTS.monthly_ai_call_limit;
+  const model = typeof cfg.ai_model === "string" ? cfg.ai_model : BOT_DEFAULTS.ai_model;
+  const sent = usage.messages_sent ?? 0;
+  const aiCalls = usage.ai_calls ?? 0;
+  const cost = estimateCost(model, usage.ai_input_tokens ?? 0, usage.ai_output_tokens ?? 0);
+
+  const meter = (a, b) => {
+    const r = ratio(a, b);
+    return h("div", { class: "meter" }, h("i", { class: r >= 0.8 ? "hot" : "", style: `width:${(r * 100).toFixed(1)}%` }));
+  };
+  const tile = (label, value, extra) => h("div", { class: "tile" }, h("span", { class: "muted" }, label), h("b", {}, value), extra ?? null);
+  const rangeSel = h("select", { style: "width:auto" }, [7, 30, 90].map((n) => h("option", { value: n }, `${n} ngày gần nhất`)));
+  rangeSel.value = String(statsDays);
+  rangeSel.addEventListener("change", () => {
+    statsDays = Number(rangeSel.value);
+    go("stats");
+  });
+  const maxQ = Math.max(1, ...s.rows.map((r) => r.questions));
+
+  show(
+    h("h2", {}, `Tháng ${month.slice(5)}/${month.slice(0, 4)}`),
+    h("div", { class: "tiles" },
+      tile("Tin đã gửi (hạn mức Zalo)", `${fmtNum.format(sent)} / ${fmtNum.format(msgLimit)}`, meter(sent, msgLimit)),
+      tile("Lỗi gửi tin", fmtNum.format(usage.send_errors ?? 0)),
+      tile("Lượt gọi AI", `${fmtNum.format(aiCalls)} / ${fmtNum.format(aiLimit)}`, meter(aiCalls, aiLimit)),
+      tile("Lỗi AI", fmtNum.format(usage.ai_errors ?? 0)),
+      tile("Token vào / ra", `${fmtNum.format(usage.ai_input_tokens ?? 0)} / ${fmtNum.format(usage.ai_output_tokens ?? 0)}`),
+      tile("Chi phí AI ước tính", cost === null ? "-" : `$${cost.toFixed(3)}`, h("span", { class: "muted" }, model)),
+    ),
+    h("div", { class: "row", style: "margin:18px 0 8px" }, h("h2", { class: "grow", style: "margin:0" }, "Câu hỏi qua AI"), rangeSel),
+    h("div", { class: "tiles" },
+      tile("Câu hỏi", fmtNum.format(s.totals.questions)),
+      tile("Bot tự trả lời", `${fmtNum.format(s.totals.answered)} (${pct(s.autoRate)})`),
+      tile("Chuyển ca", fmtNum.format(s.totals.handoff)),
+      tile("Lỗi AI", fmtNum.format(s.totals.ai_errors)),
+    ),
+    h("p", { class: "muted" }, "Chỉ tính câu đi qua luồng AI (khi ai_enabled bật). Số liệu tổng của mọi nhóm."),
+    h("div", { class: "card" },
+      h("h3", { style: "margin-top:0" }, "Mục được dùng nhiều nhất"),
+      s.topItems.length
+        ? h("table", {}, h("tr", {}, h("th", {}, "Mục"), h("th", { class: "n" }, "Lượt")),
+          s.topItems.map((t) => h("tr", {}, h("td", {}, state.kb.get(t.slug)?.title ?? t.slug), h("td", { class: "n" }, fmtNum.format(t.count)))))
+        : h("p", { class: "muted" }, "Chưa có lượt nào trong khoảng này."),
+    ),
+    h("div", { class: "card scroll" },
+      h("h3", { style: "margin-top:0" }, "Theo ngày"),
+      h("table", {},
+        h("tr", {}, h("th", {}, "Ngày"), h("th", { class: "n" }, "Câu hỏi"), h("th", { class: "n" }, "Tự trả lời"),
+          h("th", { class: "n" }, "Chuyển ca"), h("th", { class: "n" }, "Lỗi AI"), h("th", { style: "width:30%" }, "")),
+        [...s.rows].reverse().map((r) => h("tr", {},
+          h("td", {}, `${r.day.slice(8)}/${r.day.slice(5, 7)}`),
+          h("td", { class: "n" }, r.questions), h("td", { class: "n" }, r.answered),
+          h("td", { class: "n" }, r.handoff), h("td", { class: "n" }, r.ai_errors),
+          h("td", {}, h("div", { class: "meter" }, h("i", { style: `width:${((r.questions / maxQ) * 100).toFixed(1)}%` }))),
+        )),
+      ),
+    ),
+  );
+}
+
+// ---------- Màn: Cài đặt ----------
+async function renderSettings(notice) {
+  const ref = doc(db, "config", "main");
+  const snap = await getDoc(ref);
+  if (!snap.exists()) return show(msg("bad", "Chưa có tài liệu config/main trong Firestore."));
+  const raw = snap.data();
+  const before = settingsFromConfig(raw);
+  const f = structuredClone(before);
+  const errBox = h("div");
+  const chatsBox = h("div");
+
+  const drawChats = () => {
+    chatsBox.replaceChildren(
+      ...f.chats.map((c, i) => {
+        const id = h("input", { value: c.id, placeholder: "Mã nhóm (chat id)", autocomplete: "off", class: "grow" });
+        const label = h("input", { value: c.label, placeholder: "Tên dễ nhớ", autocomplete: "off", class: "grow" });
+        id.addEventListener("input", () => (c.id = id.value));
+        label.addEventListener("input", () => (c.label = label.value));
+        return h("div", { class: "row", style: "margin-bottom:6px" }, id, label,
+          h("button", { class: "btn danger", onclick: () => { f.chats.splice(i, 1); drawChats(); } }, "Xóa"));
+      }),
+      h("button", { class: "btn", onclick: () => { f.chats.push({ id: "", label: "" }); drawChats(); } }, "+ Thêm nhóm"),
+    );
+  };
+  drawChats();
+
+  const ai = h("input", { type: "checkbox", checked: f.ai_enabled, onchange: (e) => (f.ai_enabled = e.target.checked) });
+  const reply = h("input", { type: "checkbox", checked: f.reply_enabled, onchange: (e) => (f.reply_enabled = e.target.checked) });
+  const threshold = h("input", { type: "number", min: 0, max: 1, step: 0.05, value: f.confidence_threshold, style: "max-width:140px" });
+  threshold.addEventListener("input", () => (f.confidence_threshold = threshold.value));
+  const handoff = h("textarea", { rows: 3, value: f.handoff_message });
+  const handoffCount = h("div", { class: "count" });
+  const countHandoff = () => {
+    const n = charLength(cleanText(handoff.value));
+    handoffCount.textContent = `${n}/${MAX_HANDOFF_CHARS} ký tự`;
+    handoffCount.className = n > MAX_HANDOFF_CHARS ? "count over" : "count";
+  };
+  handoff.addEventListener("input", () => {
+    f.handoff_message = handoff.value;
+    countHandoff();
+  });
+  countHandoff();
+
+  const save = async () => {
+    const { data, errors } = validateSettings(f);
+    errBox.replaceChildren();
+    if (!data) return errBox.replaceChildren(list("errs", errors));
+    const warns = [];
+    if (data.ai_enabled && !before.ai_enabled) warns.push("Bật AI: bot sẽ trả lời bằng nội dung trong kho đã duyệt.");
+    if (!data.ai_enabled && before.ai_enabled) warns.push("Tắt AI: bot quay về trả lời kiểu giai đoạn 1.");
+    if (!data.reply_enabled && before.reply_enabled) warns.push("Tắt trả lời: bot sẽ không gửi tin nào.");
+    const removed = before.chats.filter((c) => !data.allowed_chat_ids.includes(c.id));
+    if (removed.length) warns.push(`Bỏ ${removed.length} nhóm khỏi danh sách: bot sẽ không trả lời các nhóm đó.`);
+    if (!data.allowed_chat_ids.length) warns.push("Danh sách nhóm trống: bot sẽ không trả lời nhóm nào.");
+    if (warns.length && !confirm(`${warns.join("\n")}\n\nLưu cài đặt?`)) return;
+    try {
+      await updateDoc(ref, { ...data, updated_at: serverTimestamp(), updated_by: state.user.email });
+      await renderSettings(msg("ok", "Đã lưu. Bot áp dụng ở tin nhắn tiếp theo."));
+    } catch (e) {
+      errBox.replaceChildren(msg("bad", errText(e)));
+    }
+  };
+
+  show(
+    notice ?? null,
+    h("div", { class: "card" },
+      h("label", { class: "row f" }, reply, "Bot được phép trả lời (reply_enabled)"),
+      h("label", { class: "row f" }, ai, "Trả lời bằng kho tri thức qua AI (ai_enabled)"),
+      h("label", { class: "f" }, "Ngưỡng tin cậy", h("span", { class: "hint" }, " 0-1; dưới ngưỡng thì chuyển ca")),
+      threshold,
+      h("label", { class: "f" }, "Tin chuyển ca", h("span", { class: "hint" }, " gửi khi bot không trả lời được")),
+      handoff,
+      handoffCount,
+    ),
+    h("div", { class: "card" },
+      h("h3", { style: "margin-top:0" }, "Nhóm Zalo được phép"),
+      h("p", { class: "muted" }, "Zalo không gửi tên nhóm, nên đặt tên dễ nhớ cho từng mã. Mã nhóm chỉ lưu trong Firestore."),
+      chatsBox,
+    ),
+    h("div", { class: "card muted" },
+      `Chỉ xem (sửa trong Firestore Console): model ${raw.ai_model ?? BOT_DEFAULTS.ai_model}, `,
+      `hạn mức tin ${fmtNum.format(raw.monthly_message_limit ?? BOT_DEFAULTS.monthly_message_limit)}/tháng, `,
+      `hạn mức AI ${fmtNum.format(raw.monthly_ai_call_limit ?? BOT_DEFAULTS.monthly_ai_call_limit)} lượt/tháng.`,
+      raw.updated_by ? ` Sửa lần cuối bởi ${raw.updated_by} lúc ${when(raw.updated_at)}.` : "",
+    ),
+    errBox,
+    h("div", { class: "actions" }, h("button", { class: "btn primary", onclick: save }, "Lưu cài đặt")),
+  );
+}
+</script>
+</body>
+</html>
