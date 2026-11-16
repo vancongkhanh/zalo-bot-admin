@@ -8,9 +8,12 @@
  */
 import { FieldValue, Firestore, Timestamp } from "firebase-admin/firestore";
 import { BotConfig, parseConfig } from "./config";
+import { KbItem, MAX_SAMPLES, toKbItem } from "./kb";
 
 export type EventState = "processing" | "done" | "failed";
-export type Outcome = "replied" | "ignored" | "error";
+/** replied: trả lời kiểu giai đoạn 1; answered/handoff: bước C. */
+export type Outcome = "replied" | "ignored" | "error" | "answered" | "handoff";
+export type HandoffReason = "no_match" | "low_confidence" | "ai_error" | "ai_quota";
 
 export interface ConversationRecord {
   chat_id: string | null;
@@ -24,6 +27,34 @@ export interface ConversationRecord {
   /** Mô tả lỗi gửi tin (đã che token); null nếu không lỗi. */
   error: string | null;
   duration_ms: number;
+  // Bước C (chỉ có khi đi qua luồng AI)
+  matched_slug?: string | null;
+  confidence?: number | null;
+  reason?: HandoffReason | null;
+  ai_ms?: number | null;
+  /** Kết quả gửi khi outcome là answered/handoff mà gửi lỗi. */
+  send_ok?: boolean;
+}
+
+export interface AiCallRecord {
+  ok: boolean;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export interface DailyStat {
+  outcome: "answered" | "handoff";
+  aiError: boolean;
+  slug: string | null;
+}
+
+export interface UnansweredInput {
+  id: string;
+  clusterKey: string;
+  sample: string;
+  reason: HandoffReason;
+  bestGuessSlug: string | null;
+  bestGuessConfidence: number | null;
 }
 
 export interface Store {
@@ -40,6 +71,19 @@ export interface Store {
   markQuotaWarning(month: string): Promise<boolean>;
   /** Ghi `conversations/{messageId}`; store tự thêm `created_at`. */
   writeConversation(messageId: string, record: ConversationRecord): Promise<void>;
+
+  // Bước C
+  /** Các mục `approved` (cache 60 giây trong bộ nhớ hàm). */
+  getApprovedItems(): Promise<KbItem[]>;
+  /** `usage/{month}.ai_calls` (0 nếu chưa có). */
+  getMonthlyAiCalls(month: string): Promise<number>;
+  recordAiCall(month: string, call: AiCallRecord): Promise<void>;
+  /** `stats_daily/{day}`: questions, answered/handoff, ai_errors, item_hits.{slug}. */
+  recordDailyStat(day: string, stat: DailyStat): Promise<void>;
+  /** Tăng `hit_count`, cập nhật `last_hit_at` của mục. */
+  recordHit(slug: string): Promise<void>;
+  /** Ghi hoặc gộp vào `unanswered/{id}` (count tăng nguyên tử). */
+  recordUnanswered(input: UnansweredInput): Promise<void>;
 }
 
 export const COLLECTIONS = {
@@ -47,7 +91,13 @@ export const COLLECTIONS = {
   events: "processed_events",
   conversations: "conversations",
   usage: "usage",
+  kb: "kb_items",
+  statsDaily: "stats_daily",
+  unanswered: "unanswered",
 } as const;
+
+export const KB_CACHE_MS = 60 * 1000;
+export const CONVERSATION_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 
 export const CONFIG_DOC = "main";
 export const EVENT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -66,6 +116,8 @@ function isAlreadyExists(err: unknown): boolean {
 }
 
 export class FirestoreStore implements Store {
+  private kbCache: { at: number; items: KbItem[] } | null = null;
+
   constructor(
     private readonly db: Firestore,
     private readonly now: () => number = Date.now,
@@ -113,9 +165,14 @@ export class FirestoreStore implements Store {
     );
   }
 
+  /** Quyết định 3 (bước C): `messages_sent` đếm cả lần gửi lỗi. */
   async recordSendError(month: string): Promise<void> {
     await this.db.collection(COLLECTIONS.usage).doc(month).set(
-      { send_errors: FieldValue.increment(1), updated_at: FieldValue.serverTimestamp() },
+      {
+        messages_sent: FieldValue.increment(1),
+        send_errors: FieldValue.increment(1),
+        updated_at: FieldValue.serverTimestamp(),
+      },
       { merge: true },
     );
   }
@@ -138,6 +195,96 @@ export class FirestoreStore implements Store {
     await this.db
       .collection(COLLECTIONS.conversations)
       .doc(messageId)
-      .set({ ...record, created_at: FieldValue.serverTimestamp() });
+      .set({
+        ...record,
+        created_at: FieldValue.serverTimestamp(),
+        expire_at: Timestamp.fromMillis(this.now() + CONVERSATION_TTL_MS),
+      });
+  }
+
+  async getApprovedItems(): Promise<KbItem[]> {
+    const t = this.now();
+    if (this.kbCache && t - this.kbCache.at < KB_CACHE_MS) return this.kbCache.items;
+    const snap = await this.db.collection(COLLECTIONS.kb).where("status", "==", "approved").get();
+    const items = snap.docs
+      .map((d) => toKbItem(d.id, d.data() as Record<string, unknown>))
+      .filter((x): x is KbItem => x !== null)
+      .sort((a, b) => a.slug.localeCompare(b.slug)); // thứ tự cố định để cache lời gọi AI
+    this.kbCache = { at: t, items };
+    return items;
+  }
+
+  async getMonthlyAiCalls(month: string): Promise<number> {
+    const snap = await this.db.collection(COLLECTIONS.usage).doc(month).get();
+    const v = snap.exists ? snap.get("ai_calls") : 0;
+    return typeof v === "number" ? v : 0;
+  }
+
+  async recordAiCall(month: string, call: AiCallRecord): Promise<void> {
+    await this.db
+      .collection(COLLECTIONS.usage)
+      .doc(month)
+      .set(
+        {
+          ai_calls: FieldValue.increment(1),
+          ai_errors: FieldValue.increment(call.ok ? 0 : 1),
+          ai_input_tokens: FieldValue.increment(call.inputTokens),
+          ai_output_tokens: FieldValue.increment(call.outputTokens),
+          updated_at: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+  }
+
+  async recordDailyStat(day: string, stat: DailyStat): Promise<void> {
+    const data: Record<string, unknown> = {
+      questions: FieldValue.increment(1),
+      [stat.outcome]: FieldValue.increment(1),
+      updated_at: FieldValue.serverTimestamp(),
+    };
+    if (stat.aiError) data.ai_errors = FieldValue.increment(1);
+    if (stat.slug) data.item_hits = { [stat.slug]: FieldValue.increment(1) };
+    await this.db.collection(COLLECTIONS.statsDaily).doc(day).set(data, { merge: true });
+  }
+
+  async recordHit(slug: string): Promise<void> {
+    await this.db.collection(COLLECTIONS.kb).doc(slug).update({
+      hit_count: FieldValue.increment(1),
+      last_hit_at: FieldValue.serverTimestamp(),
+    });
+  }
+
+  async recordUnanswered(input: UnansweredInput): Promise<void> {
+    const ref = this.db.collection(COLLECTIONS.unanswered).doc(input.id);
+    await this.db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const base = {
+        last_asked_at: FieldValue.serverTimestamp(),
+        reason: input.reason,
+        best_guess_slug: input.bestGuessSlug,
+        best_guess_confidence: input.bestGuessConfidence,
+      };
+      if (!snap.exists) {
+        tx.create(ref, {
+          ...base,
+          cluster_key: input.clusterKey,
+          samples: [input.sample],
+          count: 1,
+          first_asked_at: FieldValue.serverTimestamp(),
+          status: "new",
+          answered_slug: null,
+          answered_at: null,
+        });
+        return;
+      }
+      const samples = (snap.get("samples") as unknown[] | undefined)?.filter((x) => typeof x === "string") ?? [];
+      const update: Record<string, unknown> = { ...base, count: FieldValue.increment(1) };
+      if (samples.length < MAX_SAMPLES && !samples.includes(input.sample)) {
+        update.samples = FieldValue.arrayUnion(input.sample);
+      }
+      // Câu đã answered/ignored mà vẫn phải chuyển ca: đưa về new (mục 4.4).
+      if (snap.get("status") !== "new") update.status = "new";
+      tx.update(ref, update);
+    });
   }
 }

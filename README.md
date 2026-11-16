@@ -36,6 +36,7 @@ Không bao giờ ghi token, secret hay mã nhóm thật vào mã nguồn hoặc 
 |---|---|---|
 | `ZALO_BOT_TOKEN` | Firebase secret | Token bot |
 | `ZALO_WEBHOOK_SECRET` | Firebase secret | 8-256 ký tự, **chỉ `A-Z a-z 0-9 _ -`** (Zalo từ chối ký tự khác) |
+| `ANTHROPIC_API_KEY` | Firebase secret | Khóa Anthropic (bước C). **Phải đặt trước khi triển khai** bản có bước C, kể cả khi `ai_enabled` tắt |
 | Mã nhóm | Firestore `config/main` | Không ghi vào mã |
 
 Đặt hoặc đổi secret (gõ giá trị tại dấu nhắc; dán bằng chuột phải trong cmd):
@@ -43,6 +44,7 @@ Không bao giờ ghi token, secret hay mã nhóm thật vào mã nguồn hoặc 
 ```
 firebase functions:secrets:set ZALO_BOT_TOKEN
 firebase functions:secrets:set ZALO_WEBHOOK_SECRET
+firebase functions:secrets:set ANTHROPIC_API_KEY
 ```
 
 Tạo secret ngẫu nhiên hợp lệ: `node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`
@@ -58,6 +60,14 @@ Sau khi đổi secret phải **triển khai lại** (`firebase deploy --only fun
 | `monthly_message_limit` | number | `3000` |
 | `reply_enabled` | boolean | `false` để tạm tắt trả lời, vẫn ghi nhật ký |
 | `log_raw_body` | boolean | `true`: ghi thân yêu cầu (đã che nội dung, tên, mã người dùng) ra Cloud Logging. Tắt khi không cần |
+| `ai_enabled` | boolean | Bước C. Mặc định `false`: trả lời như giai đoạn 1 ("Đã nhận: ...") |
+| `ai_model` | string | Mặc định `claude-haiku-5-5` |
+| `confidence_threshold` | number 0-1 | Mặc định `0.7`. Dưới ngưỡng thì chuyển ca |
+| `monthly_ai_call_limit` | number | Mặc định `6000`. Hết hạn mức: không gọi AI, gửi tin mẫu |
+| `handoff_message` | string | Tin chuyển ca (tối đa 1.000 ký tự) |
+| `ai_timeout_ms` | number | Mặc định `15000`, cho phép 1.000-50.000 |
+
+Giá trị sai kiểu hoặc ngoài khoảng: hàm dùng mặc định và ghi cảnh báo "Cấu hình config/main".
 
 Hàm đọc lại cấu hình ở mỗi yêu cầu: sửa trong Console là có hiệu lực ngay.
 
@@ -66,8 +76,11 @@ Hàm đọc lại cấu hình ở mỗi yêu cầu: sửa trong Console là có 
 | Nơi | Nội dung |
 |---|---|
 | `processed_events/{message_id}` | `received_at`, `state` (`processing`/`done`/`failed`), `expire_at` (+7 ngày, TTL tự xóa) |
-| `conversations/{message_id}` | `chat_id`, `from_id`, `display_name`, `question`, `reply_text`, `outcome` (`replied`/`ignored`/`error`), `ignore_reason`, `error`, `duration_ms`, `created_at` |
-| `usage/{YYYY-MM}` | `messages_sent`, `send_errors`, `quota_warning_sent` (tháng theo giờ Việt Nam) |
+| `conversations/{message_id}` | `chat_id`, `from_id`, `display_name`, `question`, `reply_text`, `outcome` (`replied`/`ignored`/`error`/`answered`/`handoff`), `ignore_reason`, `error`, `duration_ms`, `created_at`, `expire_at` (+90 ngày, TTL). Bước C thêm `matched_slug`, `confidence`, `reason` (`no_match`/`low_confidence`/`ai_error`/`ai_quota`), `ai_ms`, `send_ok` |
+| `usage/{YYYY-MM}` | `messages_sent` (đếm mọi lần gọi `sendMessage`, kể cả lỗi), `send_errors`, `quota_warning_sent`, `ai_calls`, `ai_errors`, `ai_input_tokens`, `ai_output_tokens` (tháng theo giờ Việt Nam) |
+| `stats_daily/{YYYY-MM-DD}` | Bước C: `questions`, `answered`, `handoff`, `ai_errors`, `item_hits.{slug}` (ngày theo giờ Việt Nam) |
+| `unanswered/{id}` | Bước C: câu chuyển ca gộp theo câu đã chuẩn hóa. `cluster_key`, `samples` (≤ 3), `count`, `first_asked_at`, `last_asked_at`, `reason`, `best_guess_slug`, `best_guess_confidence`, `status` (`new`/`answered`/`ignored`), `answered_slug`, `answered_at`. Không lưu mã người dùng |
+| `kb_items/{slug}` | Bước C tăng `hit_count`, cập nhật `last_hit_at` khi bot trả lời bằng mục |
 
 `ignore_reason`: `unsupported_event:<event_name>`, `not_group:<chat_type>`, `no_mention`, `reply_disabled`, `quota`.
 Nhóm không có trong danh sách: không ghi `conversations`, chỉ ghi dòng Cloud Logging "Nhóm không được phép" kèm `chat_id`.

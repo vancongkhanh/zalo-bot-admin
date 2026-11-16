@@ -10,7 +10,8 @@
     "kb-approve": "node kb-approve.mjs",
     "kb-hide": "node kb-hide.mjs",
     "kb-list": "node kb-list.mjs",
-    "eval-import-testset": "node eval-import-testset.mjs"
+    "eval-import-testset": "node eval-import-testset.mjs",
+    "eval-run": "node eval-run.mjs"
   },
   "dependencies": {
     "exceljs": "^4.4.0",

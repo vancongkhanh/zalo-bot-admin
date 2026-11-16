@@ -27,6 +27,7 @@ Tệp Excel dữ liệu thật đặt trong `input/` (thư mục này không đ�
 | `node kb-hide.mjs slug-1` | Ẩn: bot không dùng, mục vẫn còn |
 | `node kb-list.mjs [--trang-thai=approved]` | Liệt kê |
 | `node eval-import-testset.mjs ../../input/kho.xlsx [--thu]` | Nạp sheet `Bo_thu` vào `eval_testset` |
+| `node eval-run.mjs [--model=haiku\|sonnet] [--nguong=0.7] [--gioi-han=N]` | Chạy bộ thử qua đúng hàm chọn mục của bot (bước C). Không gửi Zalo, không ghi gì vào Firestore. **Tốn phí API** |
 | `npm test` | Kiểm thử đơn vị (không cần mạng) |
 
 ## Quy tắc nạp
@@ -43,3 +44,11 @@ Tệp Excel dữ liệu thật đặt trong `input/` (thư mục này không đ�
 ## Bộ thử (`Bo_thu`)
 
 Cột `stt`, `cau_hoi_that`, `slug_dung`, `ghi_chu`. Mã tài liệu `t-01`, `t-02`… theo `stt`; nạp lại ghi đè câu cùng `stt`, không xóa câu cũ. `slug_dung` trống = bot đúng khi chuyển ca. Cảnh báo nếu `slug_dung` chưa có trong kho.
+
+## Đo chất lượng (`eval-run`, bước C)
+
+1. Build hàm một lần (sau mỗi lần sửa mã hàm): `cd functions` rồi `npm run build`.
+2. Khóa Anthropic cho máy bạn: đăng nhập `ant auth login`, hoặc đặt biến môi trường `ANTHROPIC_API_KEY` trong cửa sổ cmd hiện tại (`set ANTHROPIC_API_KEY=...`, chỉ có hiệu lực trong cửa sổ đó). Không ghi khóa vào tệp trong dự án.
+3. Chạy `node scripts/kb/eval-run.mjs --model=haiku` rồi `--model=sonnet` để so.
+
+Ngưỡng và model mặc định lấy từ `config/main`. Kết luận: `đúng`, `SAI MỤC`, `chuyển ca đúng`, `chuyển ca thừa`, `TRẢ LỜI SAI KHI KHO KHÔNG CÓ`, `lỗi AI`. Mục mong đợi chưa `approved` được tính như kho không có.

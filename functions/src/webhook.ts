@@ -4,10 +4,12 @@
  * Hàm `handleWebhook` không phụ thuộc trực tiếp vào Firebase: store, client Zalo,
  * logger và đồng hồ được truyền vào, để kiểm thử đơn vị được.
  */
-import { BotConfig, QUOTA_WARNING_RATIO, monthKey } from "./config";
+import { BotConfig, QUOTA_WARNING_RATIO, dayKey, monthKey } from "./config";
+import { buildAnswerText, clusterKey, KbItem, sampleText, unansweredId } from "./kb";
 import { stripMention } from "./mention";
 import { SECRET_HEADER, headerValue, safeEqual } from "./security";
-import type { ConversationRecord, Store } from "./store";
+import { AiClient, selectItem, Selection } from "./selector";
+import type { ConversationRecord, HandoffReason, Store } from "./store";
 import { MAX_TEXT_LENGTH, ZaloClient } from "./zaloClient";
 
 export interface WebhookRequest {
@@ -32,6 +34,8 @@ export interface WebhookDeps {
   store: Store;
   /** Tạo client khi cần gửi tin (tránh đọc token nếu không gửi). */
   getZaloClient: () => ZaloClient;
+  /** Tạo client Anthropic khi cần gọi AI (bước C). */
+  getAiClient?: () => AiClient;
   logger: Logger;
   now?: () => number;
 }
@@ -221,7 +225,13 @@ export async function handleWebhook(
       return OK;
     }
 
-    // 8. Trả lời.
+    // 8. Bước C: chọn mục bằng AI (khi bật và có câu hỏi).
+    if (config.aiEnabled && question) {
+      await answerWithAi({ deps, config, messageId, chatId, question, month, sent, baseRecord, startedAt, now });
+      return OK;
+    }
+
+    // 8. Trả lời như giai đoạn 1.
     const replyText = buildReplyText(question, config.botMentionName);
     const result = await deps.getZaloClient().sendMessage(chatId, replyText);
 
@@ -276,6 +286,133 @@ export async function handleWebhook(
     }
     return OK;
   }
+}
+
+// ---------- Bước C ----------
+
+interface AiFlowInput {
+  deps: WebhookDeps;
+  config: BotConfig;
+  messageId: string;
+  chatId: string;
+  question: string;
+  month: string;
+  sent: number;
+  baseRecord: Pick<ConversationRecord, "chat_id" | "from_id" | "display_name">;
+  startedAt: number;
+  now: () => number;
+}
+
+interface Decision {
+  item: KbItem | null;
+  reason: HandoffReason | null;
+  selection: Selection | null;
+}
+
+/** Quyết định trả lời hay chuyển ca (mục 4.2 bước 4-8). */
+async function decide(input: AiFlowInput): Promise<Decision> {
+  const { deps, config, question, month } = input;
+  const aiCalls = await deps.store.getMonthlyAiCalls(month);
+  if (aiCalls >= config.monthlyAiCallLimit) {
+    deps.logger.warn("Đã hết hạn mức gọi AI trong tháng", { month, ai_calls: aiCalls, limit: config.monthlyAiCallLimit });
+    return { item: null, reason: "ai_quota", selection: null };
+  }
+  const items = await deps.store.getApprovedItems();
+  if (items.length === 0 || !deps.getAiClient) {
+    if (!deps.getAiClient) deps.logger.error("Thiếu client AI");
+    return { item: null, reason: items.length === 0 ? "no_match" : "ai_error", selection: null };
+  }
+  const selection = await selectItem(question, items, {
+    client: deps.getAiClient(),
+    model: config.aiModel,
+    timeoutMs: config.aiTimeoutMs,
+    now: input.now,
+  });
+  await deps.store.recordAiCall(month, {
+    ok: selection.ok,
+    inputTokens: selection.inputTokens,
+    outputTokens: selection.outputTokens,
+  });
+  if (!selection.ok) {
+    deps.logger.error("Lỗi gọi AI", { message_id: input.messageId, error: selection.error, ai_ms: selection.ms });
+    return { item: null, reason: "ai_error", selection };
+  }
+  if (!selection.slug) return { item: null, reason: "no_match", selection };
+  if (selection.confidence < config.confidenceThreshold) return { item: null, reason: "low_confidence", selection };
+  return { item: items.find((i) => i.slug === selection.slug) ?? null, reason: null, selection };
+}
+
+async function answerWithAi(input: AiFlowInput): Promise<void> {
+  const { deps, config, messageId, chatId, question, month, sent, now } = input;
+  const { store, logger } = deps;
+  const { item, reason, selection } = await decide(input);
+  const okSel = selection?.ok ? selection : null;
+
+  let replyText: string;
+  if (item) {
+    const built = buildAnswerText(item);
+    replyText = built.text;
+    if (built.droppedLinks > 0) {
+      logger.warn("Câu trả lời quá 2.000 ký tự, đã bỏ bớt link", { slug: item.slug, dropped_links: built.droppedLinks });
+    }
+  } else {
+    replyText = config.handoffMessage;
+  }
+
+  const result = await deps.getZaloClient().sendMessage(chatId, replyText);
+  if (result.ok) {
+    await store.recordSendSuccess(month);
+  } else {
+    await store.recordSendError(month);
+    logger.error("Gửi tin thất bại", { message_id: messageId, chat_id: chatId, error: result.error });
+  }
+  await maybeWarnQuota(store, logger, config, month, sent + 1);
+
+  const outcome = item ? "answered" : "handoff";
+  await store.recordDailyStat(dayKey(new Date(now())), {
+    outcome,
+    aiError: reason === "ai_error",
+    slug: item && result.ok ? item.slug : null,
+  });
+  if (item && result.ok) await store.recordHit(item.slug);
+  if (!item && reason) {
+    const key = clusterKey(question);
+    await store.recordUnanswered({
+      id: unansweredId(key),
+      clusterKey: key,
+      sample: sampleText(question),
+      reason,
+      bestGuessSlug: okSel?.slug ?? null,
+      bestGuessConfidence: okSel?.slug ? okSel.confidence : null,
+    });
+  }
+
+  const record: ConversationRecord = {
+    ...input.baseRecord,
+    question,
+    reply_text: replyText,
+    outcome,
+    ignore_reason: null,
+    error: result.ok ? null : `${result.error.code}: ${result.error.description}`,
+    duration_ms: now() - input.startedAt,
+    matched_slug: item?.slug ?? null,
+    confidence: okSel ? okSel.confidence : null,
+    reason,
+    ai_ms: selection?.ms ?? null,
+    send_ok: result.ok,
+  };
+  await store.writeConversation(messageId, record);
+  await store.setEventState(messageId, result.ok ? "done" : "failed");
+  logger.info("Đã xử lý sự kiện", {
+    message_id: messageId,
+    chat_id: chatId,
+    outcome,
+    reason,
+    matched_slug: record.matched_slug,
+    confidence: record.confidence,
+    ai_ms: record.ai_ms,
+    duration_ms: record.duration_ms,
+  });
 }
 
 async function maybeWarnQuota(

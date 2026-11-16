@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_CONFIG, monthKey, parseConfig } from "../src/config";
+import { dayKey, DEFAULT_CONFIG, monthKey, parseConfig } from "../src/config";
 
 describe("parseConfig", () => {
   it("không có tài liệu → mặc định kèm cảnh báo", () => {
@@ -18,6 +18,7 @@ describe("parseConfig", () => {
     });
     expect(warnings).toEqual([]);
     expect(config).toEqual({
+      ...DEFAULT_CONFIG,
       allowedChatIds: ["zgr-a", "zgr-b"],
       botMentionName: "Bot TTHC Đảng",
       monthlyMessageLimit: 3000,
@@ -31,6 +32,65 @@ describe("parseConfig", () => {
     expect(config.allowedChatIds).toEqual([]);
     expect(config.replyEnabled).toBe(true);
     expect(warnings.length).toBe(2);
+  });
+});
+
+describe("parseConfig: trường bước C", () => {
+  it("mặc định: AI tắt, Haiku 5.5, ngưỡng 0,7, 6.000 lời gọi, 15 giây", () => {
+    expect(DEFAULT_CONFIG).toMatchObject({
+      aiEnabled: false,
+      aiModel: "claude-haiku-5-5",
+      confidenceThreshold: 0.7,
+      monthlyAiCallLimit: 6000,
+      aiTimeoutMs: 15000,
+    });
+  });
+
+  it("đọc giá trị hợp lệ", () => {
+    const { config, warnings } = parseConfig({
+      ai_enabled: true,
+      ai_model: "claude-sonnet-5-5",
+      confidence_threshold: 0.8,
+      monthly_ai_call_limit: 100,
+      handoff_message: "  Chờ chuyên viên.  ",
+      ai_timeout_ms: 5000,
+    });
+    expect(warnings).toEqual([]);
+    expect(config).toMatchObject({
+      aiEnabled: true,
+      aiModel: "claude-sonnet-5-5",
+      confidenceThreshold: 0.8,
+      monthlyAiCallLimit: 100,
+      handoffMessage: "Chờ chuyên viên.",
+      aiTimeoutMs: 5000,
+    });
+  });
+
+  it("giá trị sai → giữ mặc định, mỗi trường một cảnh báo; AI vẫn tắt", () => {
+    const { config, warnings } = parseConfig({
+      ai_enabled: "true",
+      ai_model: "gpt-4; drop",
+      confidence_threshold: 7,
+      monthly_ai_call_limit: -1,
+      handoff_message: "   ",
+      ai_timeout_ms: 120000,
+    });
+    expect(warnings.length).toBe(6);
+    expect(config).toMatchObject({
+      aiEnabled: false,
+      aiModel: "claude-haiku-5-5",
+      confidenceThreshold: 0.7,
+      monthlyAiCallLimit: 6000,
+      handoffMessage: DEFAULT_CONFIG.handoffMessage,
+      aiTimeoutMs: 15000,
+    });
+  });
+});
+
+describe("dayKey", () => {
+  it("tính ngày theo giờ Việt Nam", () => {
+    expect(dayKey(new Date("2026-11-15T17:30:00Z"))).toBe("2026-11-16");
+    expect(dayKey(new Date("2026-11-15T16:59:00Z"))).toBe("2026-11-15");
   });
 });
 
