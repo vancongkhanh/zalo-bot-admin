@@ -472,6 +472,21 @@ function mergeQuestions(existing, added) {
   return out;
 }
 
+/** Ô "Các cách hỏi" sau khi thêm các gợi ý đã chọn (bỏ câu trùng, kể cả khác dấu). */
+function addQuestionsText(text, added) {
+  return mergeQuestions(splitLines(text), added).join("\n");
+}
+
+/** Dữ liệu gửi hàm suggestQuestions từ form mục. */
+function suggestPayload(f) {
+  return {
+    title: oneLine(f.title),
+    topic: oneLine(f.topic),
+    answer: cleanText(f.answer).slice(0, MAX_ANSWER_CHARS),
+    questions: splitLines(f.questions).slice(0, MAX_QUESTIONS),
+  };
+}
+
 /** config/main → form Cài đặt (trường thiếu dùng mặc định của bot). */
 function settingsFromConfig(raw) {
   const r = raw ?? {};
@@ -618,12 +633,14 @@ function filterItems(entries, { q = "", status = "", topic = "" } = {}) {
 // Giao diện
 // =====================================================================
 const base = `https://www.gstatic.com/firebasejs/${SDK_VERSION}`;
-const [appMod, authMod, fsMod, stMod] = await Promise.all([
+const [appMod, authMod, fsMod, stMod, fnMod] = await Promise.all([
   import(`${base}/firebase-app.js`),
   import(`${base}/firebase-auth.js`),
   import(`${base}/firebase-firestore.js`),
   import(`${base}/firebase-storage.js`),
+  import(`${base}/firebase-functions.js`),
 ]);
+const { getFunctions, httpsCallable } = fnMod;
 const { getStorage, connectStorageEmulator, ref: storageRef, uploadBytes, getDownloadURL } = stMod;
 const { initializeApp } = appMod;
 const {
@@ -741,6 +758,13 @@ if (emulator) {
   connectFirestoreEmulator(db, "127.0.0.1", 8080);
   connectStorageEmulator(storage, "127.0.0.1", 9199);
 }
+// Hàm gợi ý cách hỏi (cùng vùng với zaloWebhook). Emulator không chạy hàm: trả gợi ý giả để xem giao diện.
+const suggestCall = emulator
+  ? async ({ title }) => {
+    await new Promise((r) => setTimeout(r, 400));
+    return { data: { questions: [`${title} thế nào`, `cách ${title.toLowerCase()}`, `${unaccent(title)} o dau`] } };
+  }
+  : httpsCallable(getFunctions(app, "asia-southeast1"), "suggestQuestions", { timeout: 70000 });
 
 const state = { user: null, tab: "unanswered", kb: new Map(), maxImages: BOT_DEFAULTS.max_images_per_answer };
 
@@ -1035,12 +1059,61 @@ function itemEditor({ slug, form, heading, unansweredId, onDone }) {
   const answerInput = h("textarea", { rows: 8 });
   const counter = h("div", { class: "count" });
   const statusSelect = h("select", {}, STATUSES.map((s) => h("option", { value: s }, STATUS_LABELS[s])));
-  const confirmBox = h("input", { type: "checkbox" });
+  // Ô xác nhận đánh dấu sẵn (theo yêu cầu 16/11/2026); bỏ đánh dấu thì không lưu được mục đã duyệt.
+  const confirmBox = h("input", { type: "checkbox", checked: true });
   const confirmRow = h("label", { class: "row", style: "margin-top:10px" }, confirmBox,
     "Tôi xác nhận: sau khi lưu, bot sẽ gửi nguyên văn nội dung này cho người hỏi.");
   const errList = h("div");
   const saveBtn = h("button", { class: "btn primary" }, "Lưu");
   const existing = new Set(state.kb.keys());
+
+  // ----- AI gợi ý cách hỏi -----
+  const questionsInput = h("textarea", { rows: 5 });
+  const suggestBox = h("div");
+  const suggestBtn = h("button", { class: "btn", type: "button" }, "Đề xuất cách hỏi bằng AI");
+  suggestBtn.addEventListener("click", async () => {
+    const payload = suggestPayload(f);
+    if (!payload.title) return suggestBox.replaceChildren(msg("bad", "Nhập tiêu đề trước, AI dựa vào tiêu đề để đề xuất."));
+    suggestBtn.disabled = true;
+    suggestBtn.textContent = "AI đang đề xuất…";
+    suggestBox.replaceChildren(h("p", { class: "muted" }, "Thường mất vài giây."));
+    try {
+      const res = await suggestCall(payload);
+      const fresh = (res.data?.questions ?? []).filter((q) => typeof q === "string");
+      const shown = fresh.filter((q) => addQuestionsText(f.questions, [q]) !== splitLines(f.questions).join("\n"));
+      if (!shown.length) {
+        suggestBox.replaceChildren(msg("warn", "AI không có gợi ý mới (các câu gợi ý đã có trong danh sách)."));
+        return;
+      }
+      const boxes = shown.map(() => h("input", { type: "checkbox", checked: true }));
+      const addBtn = h("button", { class: "btn primary", type: "button" }, "Thêm các câu đã chọn");
+      addBtn.addEventListener("click", () => {
+        const picked = shown.filter((_, i) => boxes[i].checked);
+        f.questions = questionsInput.value = addQuestionsText(f.questions, picked);
+        suggestBox.replaceChildren(msg("ok", `Đã thêm ${picked.length} cách hỏi. Đọc lại và sửa nếu cần trước khi lưu.`));
+        check();
+      });
+      suggestBox.replaceChildren(h("div", { class: "card", style: "margin:8px 0" },
+        h("p", { class: "muted", style: "margin-top:0" }, "Gợi ý của AI (bỏ chọn câu không phù hợp):"),
+        shown.map((q, i) => h("label", { class: "row", style: "margin:4px 0;flex-wrap:nowrap" },
+          boxes[i], h("span", { style: "min-width:0;overflow-wrap:anywhere" }, q))),
+        h("div", { class: "actions" },
+          h("button", { class: "btn", type: "button", onclick: () => suggestBox.replaceChildren() }, "Bỏ qua"),
+          addBtn),
+      ));
+    } catch (e) {
+      console.error(e);
+      const text = e?.code === "functions/permission-denied" || e?.code === "functions/unauthenticated"
+        ? "Tài khoản chưa có quyền dùng AI đề xuất."
+        : e?.code === "functions/not-found" || e?.code === "functions/internal"
+          ? "Chưa gọi được hàm suggestQuestions (đã triển khai hàm chưa?)."
+          : (e?.message || "AI chưa đề xuất được, thử lại sau.");
+      suggestBox.replaceChildren(msg("bad", text));
+    } finally {
+      suggestBtn.disabled = false;
+      suggestBtn.textContent = "Đề xuất cách hỏi bằng AI";
+    }
+  });
 
   // ----- Ảnh (bước E) -----
   f.images = normalizeImages(f.images);
@@ -1201,7 +1274,10 @@ function itemEditor({ slug, form, heading, unansweredId, onDone }) {
     field("slug", "Mã mục (slug)", isNew ? "chữ thường không dấu, gạch ngang; không đổi được sau khi tạo" : "", slugInput),
     field("title", "Tiêu đề", "", titleInput),
     field("topic", "Nhóm", "", h("input", { autocomplete: "off" })),
-    field("questions", "Các cách hỏi", "mỗi dòng một cách; AI dựa vào tiêu đề và phần này để chọn mục", h("textarea", { rows: 5 })),
+    field("questions", "Các cách hỏi", "mỗi dòng một cách; AI dựa vào tiêu đề và phần này để chọn mục", questionsInput),
+    h("div", { class: "row", style: "margin-top:6px" }, suggestBtn,
+      h("span", { class: "hint" }, "AI gợi ý dựa trên tiêu đề (và nội dung trả lời nếu có); bạn chọn câu nào thêm vào")),
+    suggestBox,
     field("answer", "Nội dung trả lời", "bot gửi nguyên văn", answerInput),
     counter,
     field("links", "Link", 'mỗi dòng "Nhãn | https://..."', h("textarea", { rows: 3 })),
