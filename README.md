@@ -1,0 +1,127 @@
+# Bot TTHC Đảng: webhook giai đoạn 1
+
+Backend nhận tin từ Zalo Bot qua webhook, chạy trên Firebase Cloud Functions (thế hệ 2, Node.js 24, vùng `asia-southeast1`).
+Phạm vi giai đoạn 1: xác thực, chống trùng, chỉ trả lời nhóm được phép, trả lời cố định `Đã nhận: {câu hỏi}`, nhật ký và bộ đếm. Chưa có AI hay kho tri thức.
+
+- Dự án Firebase: `zalo-bot-tthc-dang`
+- Địa chỉ webhook: `https://asia-southeast1-zalo-bot-tthc-dang.cloudfunctions.net/zaloWebhook`
+
+## Cấu trúc
+
+```
+firebase.json, .firebaserc, firestore.rules, firestore.indexes.json (TTL cho processed_events.expire_at)
+functions/src/
+  index.ts       hàm zaloWebhook: nối secrets, Firestore, logger vào luồng xử lý
+  webhook.ts     luồng xử lý chính (spec mục 6)
+  zaloClient.ts  sendMessage, sendPhoto (chưa dùng), setWebhook, deleteWebhook, getMe, getWebhookInfo
+  mention.ts     cắt @tên bot
+  security.ts    so sánh secret thời gian không đổi
+  store.ts       Firestore: chống trùng, nhật ký, bộ đếm, cấu hình
+  config.ts      secrets, đọc config/main, tháng theo giờ Việt Nam
+functions/test/  kiểm thử đơn vị (vitest)
+scripts/
+  webhook-set.mjs     đăng ký webhook
+  webhook-delete.mjs  xóa webhook (để quay lại getUpdates)
+  check-bot.mjs       chẩn đoán: getMe + getWebhookInfo (chỉ đọc)
+  send-sample.mjs     gửi sự kiện mẫu tới hàm để thử, in mã HTTP và thời gian
+  sample-event.json   sự kiện mẫu (toàn giá trị giả)
+  test-photo.mjs      thử sendPhoto (ngoài phạm vi giai đoạn 1)
+```
+
+## Bí mật
+
+Không bao giờ ghi token, secret hay mã nhóm thật vào mã nguồn hoặc Git.
+
+| Tên | Lưu ở | Ghi chú |
+|---|---|---|
+| `ZALO_BOT_TOKEN` | Firebase secret | Token bot |
+| `ZALO_WEBHOOK_SECRET` | Firebase secret | 8-256 ký tự, **chỉ `A-Z a-z 0-9 _ -`** (Zalo từ chối ký tự khác) |
+| Mã nhóm | Firestore `config/main` | Không ghi vào mã |
+
+Đặt hoặc đổi secret (gõ giá trị tại dấu nhắc; dán bằng chuột phải trong cmd):
+
+```
+firebase functions:secrets:set ZALO_BOT_TOKEN
+firebase functions:secrets:set ZALO_WEBHOOK_SECRET
+```
+
+Tạo secret ngẫu nhiên hợp lệ: `node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`
+
+Sau khi đổi secret phải **triển khai lại** (`firebase deploy --only functions`), vì hàm gắn với một phiên bản secret cụ thể. Đổi `ZALO_WEBHOOK_SECRET` thì chạy lại `webhook-set` với giá trị mới.
+
+## Cấu hình `config/main` (Firestore)
+
+| Trường | Kiểu | Ý nghĩa |
+|---|---|---|
+| `allowed_chat_ids` | array chuỗi | Mã nhóm được phép (`zgr-...`). Nhiều nhóm được; gói Basic cho tối đa 3 nhóm |
+| `bot_mention_name` | string | `Bot TTHC Đảng` |
+| `monthly_message_limit` | number | `3000` |
+| `reply_enabled` | boolean | `false` để tạm tắt trả lời, vẫn ghi nhật ký |
+| `log_raw_body` | boolean | `true`: ghi thân yêu cầu (đã che nội dung, tên, mã người dùng) ra Cloud Logging. Tắt khi không cần |
+
+Hàm đọc lại cấu hình ở mỗi yêu cầu: sửa trong Console là có hiệu lực ngay.
+
+## Dữ liệu ghi ra
+
+| Nơi | Nội dung |
+|---|---|
+| `processed_events/{message_id}` | `received_at`, `state` (`processing`/`done`/`failed`), `expire_at` (+7 ngày, TTL tự xóa) |
+| `conversations/{message_id}` | `chat_id`, `from_id`, `display_name`, `question`, `reply_text`, `outcome` (`replied`/`ignored`/`error`), `ignore_reason`, `error`, `duration_ms`, `created_at` |
+| `usage/{YYYY-MM}` | `messages_sent`, `send_errors`, `quota_warning_sent` (tháng theo giờ Việt Nam) |
+
+`ignore_reason`: `unsupported_event:<event_name>`, `not_group:<chat_type>`, `no_mention`, `reply_disabled`, `quota`.
+Nhóm không có trong danh sách: không ghi `conversations`, chỉ ghi dòng Cloud Logging "Nhóm không được phép" kèm `chat_id`.
+
+## Phát triển và kiểm thử
+
+```
+cd functions
+npm install
+npm run build
+npm test
+```
+
+## Triển khai
+
+```
+firebase deploy --only functions,firestore
+```
+
+## Đăng ký webhook
+
+```
+npm --prefix functions run build
+node scripts/check-bot.mjs      # kiểm tra token (getMe) và webhook hiện tại
+node scripts/webhook-set.mjs    # đăng ký; phản hồi có verification.outcome = webhook.ok là đạt
+node scripts/webhook-delete.mjs # xóa, khi cần quay lại getUpdates
+```
+
+Script đọc `ZALO_BOT_TOKEN`, `ZALO_WEBHOOK_SECRET`, `ZALO_WEBHOOK_URL` từ biến môi trường; nếu không có thì hỏi (bí mật được hỏi ẩn ký tự). Script in "dấu vân tay" (độ dài + 8 ký tự đầu SHA-256) để đối chiếu mà không lộ giá trị, và từ chối chuỗi có ký tự điều khiển (thường do Ctrl+V không dán được trong cmd).
+
+## Thử nhanh bằng sự kiện mẫu
+
+```
+node scripts/send-sample.mjs --get            # mong đợi 405
+node scripts/send-sample.mjs --no-secret      # mong đợi 401
+node scripts/send-sample.mjs --wrong-secret   # mong đợi 401
+node scripts/send-sample.mjs                  # 200; nhóm giả nên chỉ ghi "Nhóm không được phép"
+node scripts/send-sample.mjs --id X; node scripts/send-sample.mjs --id X   # lần 2 là "Sự kiện trùng"
+```
+
+Cảnh báo: dùng `--chat` với mã nhóm có trong `allowed_chat_ids` thì bot gửi tin **thật** vào nhóm (trừ khi `--id` đã được xử lý).
+
+## Xem nhật ký
+
+```
+firebase functions:log --only zaloWebhook
+```
+
+Hoặc Firebase Console, Functions, Logs. Các dòng đáng chú ý: "Nhóm không được phép" (lấy mã nhóm), "Sự kiện trùng", "Đã xử lý sự kiện" (có `duration_ms`), "Đã dùng 80% hạn mức", "Gửi tin thất bại".
+
+## Điều khác với tài liệu Zalo đã gặp
+
+- `secret_token` chỉ nhận `A-Z a-z 0-9 _ -` (tài liệu chỉ nêu độ dài 8-256).
+- `getWebhookInfo` trả `error_code 404 "Not Found"` khi chưa đăng ký webhook.
+- `setWebhook` thành công trả `updated_at: 0`.
+- Sau `setWebhook`, Zalo gửi yêu cầu thử `event_name: "webhook.test"`, `message_id: "webhook-test"`, không có `chat`/`from`, `date` tính bằng giây. Hàm bỏ qua và trả 200.
+- Lỗi API trả HTTP 200 kèm `ok: false`, `error_code`, `description`.

@@ -1,0 +1,11 @@
+{
+  "event_name": "message.text.received",
+  "message": {
+    "message_id": "FAKEMSG00000000000001",
+    "date": 1794668448525,
+    "message_type": "CHAT_TEXT",
+    "from": { "id": "FAKEUSER0000000000001", "display_name": "Ten Nguoi Dung", "is_bot": false },
+    "chat": { "id": "zgr-FAKEGROUP000000000001", "chat_type": "GROUP" },
+    "text": "@Bot TTHC Đảng xin chào"
+  }
+}

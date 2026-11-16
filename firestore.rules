@@ -1,0 +1,10 @@
+rules_version = '2';
+// Giai đoạn 1: chỉ Cloud Functions (Admin SDK, bỏ qua quy tắc này) được đọc/ghi.
+// Mọi truy cập từ client đều bị từ chối.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

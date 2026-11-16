@@ -1,0 +1,19 @@
+node_modules/
+functions/lib/
+*.log
+.firebase/
+.runtimeconfig.json
+# Secrets / local env: never commit
+.env
+.env.*
+.secret.local
+functions/.env*
+functions/.secret.local
+scripts/*.local.json
+.vitest/
+
+# Ghi chú bí mật cục bộ: không bao giờ commit
+*secret*.txt
+*Secret*.txt
+*token*.txt
+*Token*.txt
