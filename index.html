@@ -84,6 +84,18 @@
     padding: 8px; margin-bottom: 8px; flex-wrap: wrap; }
   .imgrow img { width: 96px; height: 72px; object-fit: cover; border-radius: 6px; background: var(--chip); display: block; }
   .imgrow .btn { padding: 5px 10px; }
+  .hist .clickable { cursor: pointer; }
+  .chip.st-ok { background: var(--ok-bg); color: var(--ok); }
+  .chip.st-warn { background: var(--warn-bg); color: var(--warn); }
+  .chip.st-bad { background: var(--bad-bg); color: var(--bad); }
+  .chip.st-muted { color: var(--muted); }
+  .histd { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 6px; }
+  .histd h4 { margin: 10px 0 4px; font-size: 14px; }
+  .kv { display: grid; grid-template-columns: 130px 1fr; gap: 8px; font-size: 14px; overflow-wrap: anywhere; }
+  .quote { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 10px; margin: 6px 0; }
+  mark.pii { background: var(--warn-bg); color: var(--warn); border-radius: 4px; padding: 0 3px; }
+  @media (max-width: 600px) { .kv { grid-template-columns: 1fr; gap: 0; margin-bottom: 4px; } }
   @media (max-width: 600px) {
     dialog { width: 100vw; max-width: 100vw; height: 100vh; max-height: 100vh; margin: 0; border-radius: 0; }
     .dlg { max-height: 100vh; }
@@ -150,6 +162,8 @@ const BOT_DEFAULTS = {
   monthly_image_ai_limit: 300,
   image_quota_message: "Bot tạm không đọc được ảnh, bạn gõ câu hỏi bằng chữ giúp nhé.",
   image_summary_enabled: true,
+  // Bước G: chép chữ trên ảnh cho màn Lịch sử.
+  image_text_enabled: true,
 };
 const MAX_IMAGE_AI_LIMIT = 10000;
 const MAX_IMAGE_QUOTA_MESSAGE_CHARS = 500;
@@ -532,6 +546,7 @@ function settingsFromConfig(raw) {
         ? r.monthly_image_ai_limit
         : BOT_DEFAULTS.monthly_image_ai_limit,
     ),
+    image_text_enabled: typeof r.image_text_enabled === "boolean" ? r.image_text_enabled : BOT_DEFAULTS.image_text_enabled,
     image_quota_message: typeof r.image_quota_message === "string" && r.image_quota_message.trim()
       ? r.image_quota_message
       : BOT_DEFAULTS.image_quota_message,
@@ -597,6 +612,7 @@ function validateSettings(f) {
       max_images_per_answer: maxImages,
       image_ai_enabled: !!f.image_ai_enabled,
       image_summary_enabled: !!(f.image_summary_enabled ?? BOT_DEFAULTS.image_summary_enabled),
+      image_text_enabled: !!(f.image_text_enabled ?? BOT_DEFAULTS.image_text_enabled),
       monthly_image_ai_limit: imageLimit,
       image_quota_message: imageQuota,
       allowed_chat_ids: ids,
@@ -673,6 +689,158 @@ function filterItems(entries, { q = "", status = "", topic = "" } = {}) {
     })
     .sort(([a, x], [b, y]) => (x.title ?? a).localeCompare(y.title ?? b, "vi"));
 }
+
+// ---------- Bước G: Lịch sử hỗ trợ ----------
+const HISTORY_PAGE_SIZE = 50;
+/** Tin gọi tên bot mà bot không trả lời (outcome ignored). Các lý do khác (no_mention…) không bao giờ hiện. */
+const SILENT_REASONS = ["reply_disabled", "quota", "image_ai_disabled"];
+const SILENT_LABELS = {
+  reply_disabled: "Đang tắt trả lời",
+  quota: "Hết hạn mức tin trong tháng",
+  image_ai_disabled: "Chưa bật đọc ảnh",
+};
+const HISTORY_KINDS = [
+  ["all", "Tất cả"],
+  ["answered", "Trả lời được"],
+  ["handoff", "Chuyển ca"],
+  ["error", "Lỗi"],
+  ["silent", "Bot không trả lời"],
+];
+const HISTORY_RANGES = [
+  ["today", "Hôm nay"],
+  ["7", "7 ngày"],
+  ["30", "30 ngày"],
+  ["90", "90 ngày"],
+];
+const PII_OPEN = "⟦";
+const PII_CLOSE = "⟧";
+const PII_MASK = "[đã ẩn]";
+
+/** Điều kiện truy vấn: các cặp [trường, giá trị cho "in"], nối bằng HOẶC. */
+function historyClauses(kind) {
+  const answered = ["outcome", ["answered", "replied"]];
+  const handoff = ["outcome", ["handoff"]];
+  const silent = ["ignore_reason", SILENT_REASONS];
+  if (kind === "answered") return [answered];
+  if (kind === "handoff") return [handoff];
+  if (kind === "error") return [["outcome", ["error"]], ["send_ok", [false]]];
+  if (kind === "silent") return [silent];
+  return [["outcome", ["answered", "replied", "handoff", "error"]], silent];
+}
+
+/** Mốc bắt đầu: "today" là 0 giờ hôm nay giờ Việt Nam; số là n ngày gần nhất (gồm hôm nay). */
+function historySince(range, now = new Date()) {
+  const days = range === "today" ? 1 : Number(range) || 7;
+  const first = dayKey(new Date(now.getTime() - (days - 1) * 86400000));
+  return new Date(`${first}T00:00:00+07:00`);
+}
+
+/** Chỉ tin có gọi tên bot (phòng dữ liệu lạ lọt qua truy vấn). */
+function isHistoryRecord(c) {
+  if (!c || typeof c !== "object") return false;
+  if (c.outcome === "ignored") return SILENT_REASONS.includes(c.ignore_reason);
+  return ["answered", "replied", "handoff", "error"].includes(c.outcome);
+}
+
+/** Nhãn kết quả của một lần hỗ trợ. */
+function historyStatus(c) {
+  if (c.outcome === "error" || c.send_ok === false) return { key: "error", label: "Lỗi gửi tin", cls: "bad" };
+  if (c.outcome === "answered" || c.outcome === "replied") return { key: "answered", label: "Trả lời được", cls: "ok" };
+  if (c.outcome === "handoff") return { key: "handoff", label: "Chuyển ca", cls: "warn" };
+  return { key: "silent", label: "Bot không trả lời", cls: "muted" };
+}
+
+/** Dòng khớp đúng nhãn của bộ lọc (ví dụ "Trả lời được" không gồm tin gửi lỗi). */
+function matchesKind(c, kind) {
+  return isHistoryRecord(c) && (kind === "all" || historyStatus(c).key === kind);
+}
+
+function historySummary(rows) {
+  const out = { total: 0, answered: 0, handoff: 0, error: 0, silent: 0, image: 0 };
+  for (const c of rows) {
+    out.total++;
+    out[historyStatus(c).key]++;
+    if (c.source === "image") out.image++;
+  }
+  return out;
+}
+
+/**
+ * Tìm chữ (không dấu) trong các dòng đã tải. Không tìm trong chữ đọc từ ảnh và phần đã ẩn,
+ * để ô tìm không dùng được để dò thông tin cá nhân.
+ */
+function filterHistory(rows, q = "") {
+  const needle = unaccent(q).trim();
+  if (!needle) return rows;
+  return rows.filter((c) =>
+    unaccent([c.display_name, maskPii(c.question), c.reply_text, c.image_summary, c.matched_slug].join("\n"))
+      .includes(needle));
+}
+
+// Số điện thoại (0… hoặc +84…, 10-11 chữ số, cho phép dấu cách/chấm/gạch), CCCD 12 số, email.
+const PII_PATTERNS = [
+  /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g,
+  /(?<![\d+])(?:\+84|0)(?:[ .-]?\d){9,10}(?!\d)/g,
+  /(?<!\d)\d{12}(?!\d)/g,
+];
+
+function splitPatterns(text) {
+  const ranges = [];
+  for (const re of PII_PATTERNS) {
+    for (const m of text.matchAll(re)) ranges.push([m.index, m.index + m[0].length]);
+  }
+  ranges.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  const out = [];
+  let pos = 0;
+  for (const [s, e] of ranges) {
+    if (s < pos) continue;
+    if (s > pos) out.push({ text: text.slice(pos, s), pii: false });
+    out.push({ text: text.slice(s, e), pii: true });
+    pos = e;
+  }
+  if (pos < text.length) out.push({ text: text.slice(pos), pii: false });
+  return out;
+}
+
+/**
+ * Tách chữ thành đoạn thường và đoạn thông tin cá nhân: đoạn AI bọc ⟦…⟧ (bỏ dấu bọc;
+ * thiếu dấu đóng thì phần còn lại coi là cá nhân), cộng số điện thoại, CCCD, email tự nhận.
+ */
+function splitPii(text) {
+  const s = typeof text === "string" ? text : "";
+  const out = [];
+  let pos = 0;
+  while (pos < s.length) {
+    const open = s.indexOf(PII_OPEN, pos);
+    if (open < 0) {
+      out.push(...splitPatterns(s.slice(pos)));
+      break;
+    }
+    if (open > pos) out.push(...splitPatterns(s.slice(pos, open)));
+    const close = s.indexOf(PII_CLOSE, open + 1);
+    const end = close < 0 ? s.length : close;
+    const inner = s.slice(open + 1, end);
+    if (inner) out.push({ text: inner, pii: true });
+    pos = close < 0 ? s.length : close + 1;
+  }
+  return out.filter((p) => p.text);
+}
+
+function hasPii(...texts) {
+  return texts.some((t) => splitPii(t).some((p) => p.pii));
+}
+
+/** Chữ đã ẩn (dùng cho ô tìm và kiểm thử); trang vẫn vẽ từng đoạn để bấm Hiện. */
+function maskPii(text) {
+  return splitPii(text).map((p) => (p.pii ? PII_MASK : p.text)).join("");
+}
+
+function formatBytes(n) {
+  if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return "";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
 /* LOGIC-END */
 
 // =====================================================================
@@ -695,7 +863,7 @@ const {
 } = authMod;
 const {
   getFirestore, connectFirestoreEmulator, collection, doc, getDoc, getDocs, query, where, orderBy, limit,
-  documentId, serverTimestamp, runTransaction, writeBatch, updateDoc,
+  documentId, serverTimestamp, runTransaction, writeBatch, updateDoc, or, and, startAfter, addDoc,
 } = fsMod;
 
 const $app = document.getElementById("app");
@@ -827,6 +995,7 @@ async function loadKb() {
 
 const TABS = [
   ["unanswered", "Câu chưa trả lời"],
+  ["history", "Lịch sử"],
   ["kb", "Kho tri thức"],
   ["stats", "Thống kê"],
   ["settings", "Cài đặt"],
@@ -844,6 +1013,7 @@ async function go(tab) {
   show(h("div", { class: "center muted" }, "Đang tải…"));
   try {
     if (tab === "unanswered") await renderUnanswered();
+    else if (tab === "history") await renderHistory();
     else if (tab === "kb") await renderKb();
     else if (tab === "stats") await renderStats();
     else await renderSettings();
@@ -916,6 +1086,257 @@ onAuthStateChanged(auth, async (user) => {
   }
   go(state.tab);
 });
+
+// ---------- Màn: Lịch sử hỗ trợ (bước G) ----------
+// Chỉ đọc conversations; không sửa, không xóa. Thông tin cá nhân ẩn mặc định, bấm "Hiện" thì ghi pii_views.
+const hist = { kind: "all", range: "7", chatId: "", q: "", rows: [], last: null, done: false, labels: {}, chats: [],
+  open: new Set(), revealed: new Set(), error: null };
+
+function historyQuery(after) {
+  const ors = historyClauses(hist.kind).map(([f, v]) => where(f, "in", v));
+  const conds = [where("created_at", ">=", historySince(hist.range))];
+  if (hist.chatId) conds.push(where("chat_id", "==", hist.chatId));
+  conds.push(ors.length > 1 ? or(...ors) : ors[0]);
+  const parts = [orderBy("created_at", "desc"), limit(HISTORY_PAGE_SIZE)];
+  if (after) parts.splice(1, 0, startAfter(after));
+  return query(collection(db, "conversations"), and(...conds), ...parts);
+}
+
+async function loadHistory(more = false) {
+  if (!more) {
+    hist.rows = [];
+    hist.last = null;
+    hist.done = false;
+  }
+  const snap = await getDocs(historyQuery(more ? hist.last : null));
+  hist.rows.push(...snap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((c) => matchesKind(c, hist.kind)));
+  hist.last = snap.docs.at(-1) ?? hist.last;
+  hist.done = snap.size < HISTORY_PAGE_SIZE;
+}
+
+async function renderHistory(notice) {
+  const [cfg] = await Promise.all([getDoc(doc(db, "config", "main")).catch(() => null), loadKb()]);
+  const s = settingsFromConfig(cfg?.exists() ? cfg.data() : {});
+  hist.chats = s.chats;
+  hist.labels = Object.fromEntries(s.chats.map((c) => [c.id, c.label || c.id]));
+  hist.revealed.clear();
+  hist.open.clear();
+  hist.q = "";
+  hist.error = null;
+  try {
+    await loadHistory();
+  } catch (e) {
+    console.error(e);
+    hist.error = errText(e);
+  }
+  drawHistory(notice);
+}
+
+function drawHistory(notice) {
+  const sel = (value, options, onchange) => {
+    const el = h("select", { onchange: (e) => onchange(e.target.value), style: "width:auto" },
+      options.map(([v, label]) => h("option", { value: v }, label)));
+    el.value = value;
+    return el;
+  };
+  const reload = async () => {
+    show(h("div", { class: "center muted" }, "Đang tải…"));
+    hist.error = null;
+    try {
+      await loadHistory();
+    } catch (e) {
+      console.error(e);
+      hist.error = errText(e);
+    }
+    drawHistory();
+  };
+  const search = h("input", { type: "search", placeholder: "Tìm trong các dòng đã tải…", value: hist.q, class: "grow" });
+  const listBox = h("div");
+  const summaryBox = h("p", { class: "muted" });
+  const paint = () => {
+    const rows = filterHistory(hist.rows, hist.q);
+    const t = historySummary(rows);
+    summaryBox.textContent = `${fmtNum.format(t.total)} lần hỗ trợ${hist.done ? "" : " (đã tải " +
+      fmtNum.format(hist.rows.length) + ", còn nữa)"}: ${t.answered} trả lời được, ${t.handoff} chuyển ca, ` +
+      `${t.error} lỗi, ${t.silent} bot không trả lời; ${t.image} tin ảnh.`;
+    listBox.replaceChildren(...nodes(
+      rows.length ? rows.map(historyCard) : h("div", { class: "card center muted" }, "Không có lần hỗ trợ nào."),
+    ));
+  };
+  search.addEventListener("input", () => {
+    hist.q = search.value;
+    paint();
+  });
+  show(
+    notice ?? null,
+    hist.error ? msg("bad", hist.error) : null,
+    h("div", { class: "card" },
+      h("div", { class: "row" },
+        sel(hist.kind, HISTORY_KINDS, (v) => ((hist.kind = v), reload())),
+        sel(hist.range, HISTORY_RANGES, (v) => ((hist.range = v), reload())),
+        sel(hist.chatId, [["", "Mọi nhóm"], ...hist.chats.map((c) => [c.id, c.label || c.id])],
+          (v) => ((hist.chatId = v), reload())),
+        search,
+      ),
+      h("p", { class: "muted", style: "margin:8px 0 0" },
+        "Chỉ hiện tin có gọi tên bot. Nhật ký giữ 90 ngày. Thông tin cá nhân (tên, số điện thoại, CCCD, mã hồ sơ, ",
+        "địa chỉ…) ẩn mặc định; mỗi lần bấm Hiện được ghi lại."),
+    ),
+    summaryBox,
+    listBox,
+    hist.done || hist.error ? null : h("div", { class: "center", style: "padding:8px" },
+      h("button", { class: "btn", onclick: async (e) => {
+        e.target.disabled = true;
+        try {
+          await loadHistory(true);
+        } catch (err) {
+          alert(errText(err));
+        }
+        drawHistory();
+      } }, "Tải thêm")),
+    piiViewsCard(),
+  );
+  paint();
+}
+
+/** Vẽ chữ có thông tin cá nhân: mặc định thành [đã ẩn]. */
+function piiText(text, revealed) {
+  return splitPii(text).map((p) => (p.pii
+    ? h("mark", { class: "pii", title: revealed ? "Thông tin cá nhân" : "Đã ẩn thông tin cá nhân" },
+      revealed ? p.text : PII_MASK)
+    : p.text));
+}
+
+function historyCard(c) {
+  const st = historyStatus(c);
+  const isOpen = hist.open.has(c.id);
+  const revealed = hist.revealed.has(c.id);
+  const item = c.matched_slug ? state.kb.get(c.matched_slug) : null;
+  const isImage = c.source === "image";
+  const piiHere = hasPii(c.question, c.image_text);
+  const toggle = () => {
+    if (isOpen) hist.open.delete(c.id);
+    else hist.open.add(c.id);
+    card.replaceWith(historyCard(c));
+  };
+  const reveal = async (e) => {
+    e.stopPropagation();
+    e.target.disabled = true;
+    try {
+      await addDoc(collection(db, "pii_views"), {
+        conversation_id: c.id, viewed_by: state.user.email, viewed_at: serverTimestamp(),
+      });
+      hist.revealed.add(c.id);
+      hist.open.add(c.id);
+      card.replaceWith(historyCard(c));
+    } catch (err) {
+      e.target.disabled = false;
+      alert(errText(err));
+    }
+  };
+  const hide = (e) => {
+    e.stopPropagation();
+    hist.revealed.delete(c.id);
+    card.replaceWith(historyCard(c));
+  };
+  const meta = (label, value) => (value === null || value === undefined || value === ""
+    ? null
+    : h("div", { class: "kv" }, h("span", { class: "muted" }, label), h("span", {}, value)));
+  const reasonText = c.outcome === "ignored"
+    ? SILENT_LABELS[c.ignore_reason] ?? c.ignore_reason
+    : c.reason ? REASON_LABELS[c.reason] ?? c.reason : null;
+
+  const card = h("div", { class: "card hist" },
+    h("div", { class: "row clickable", onclick: toggle, role: "button", tabindex: 0,
+      onkeydown: (e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), toggle()) },
+      h("span", { class: `chip st-${st.cls}` }, st.label),
+      isImage ? h("span", { class: "chip", title: "Người dùng gửi ảnh; ảnh không được lưu" }, "Ảnh") : null,
+      h("span", { class: "muted" }, when(c.created_at)),
+      h("span", { class: "muted" }, hist.labels[c.chat_id] ?? "Nhóm khác"),
+      h("span", { class: "muted" }, c.display_name || "(không tên)"),
+      h("span", { class: "muted", style: "margin-left:auto" }, isOpen ? "Thu gọn ▴" : "Chi tiết ▾"),
+    ),
+    h("p", { class: "sample", style: "margin:6px 0 0" },
+      c.question ? ["“", piiText(c.question, revealed), "”"] : h("span", { class: "muted" }, "(không có chữ)")),
+    h("p", { class: "muted", style: "margin:4px 0 0" }, [
+      item || c.matched_slug ? `Mục: ${item?.title ?? c.matched_slug}` : "",
+      typeof c.confidence === "number" ? `độ tin cậy ${c.confidence.toFixed(2)}` : "",
+      reasonText ? `Lý do: ${reasonText}` : "",
+      isImage && c.image_summary ? `Ảnh: ${c.image_summary}` : "",
+    ].filter(Boolean).join(" · ")),
+    isOpen ? h("div", { class: "histd" },
+      piiHere ? h("div", { class: "row", style: "justify-content:flex-end" },
+        revealed
+          ? h("button", { class: "btn", onclick: hide }, "Ẩn thông tin cá nhân")
+          : h("button", { class: "btn", onclick: reveal }, "Hiện thông tin cá nhân")) : null,
+      h("section", {},
+        h("h4", {}, "Người dùng đã nhắn"),
+        meta("Người gửi", c.display_name || "(không tên)"),
+        meta("Nhóm", hist.labels[c.chat_id] ?? "Nhóm khác"),
+        meta("Thời gian", when(c.created_at)),
+        meta("Loại tin", isImage ? "Ảnh kèm chú thích" : "Chữ"),
+        h("div", { class: "quote" }, c.question ? piiText(c.question, revealed) : h("span", { class: "muted" }, "(trống)")),
+      ),
+      isImage ? h("section", {},
+        h("h4", {}, "Thông tin đọc từ ảnh"),
+        meta("Mô tả", c.image_summary || "(không có)"),
+        meta("Ảnh", [c.image_type, formatBytes(c.image_bytes)].filter(Boolean).join(", ") || null),
+        c.image_text
+          ? h("div", { class: "quote" }, piiText(c.image_text, revealed))
+          : h("p", { class: "muted" }, c.reason === "image_fetch_error"
+            ? "Bot không tải được ảnh nên không đọc được."
+            : "Không có chữ đọc từ ảnh (ảnh gửi trước bước G, đang tắt chép chữ, hoặc ảnh không có chữ)."),
+      ) : null,
+      h("section", {},
+        h("h4", {}, "Bot đã hỗ trợ"),
+        meta("Kết quả", st.label),
+        meta("Mục đã chọn", item || c.matched_slug ? `${item?.title ?? "(mục đã xóa)"} (${c.matched_slug})` : null),
+        meta("Độ tin cậy", typeof c.confidence === "number" ? c.confidence.toFixed(2) : null),
+        meta("Lý do", reasonText),
+        meta("Ảnh gửi kèm", typeof c.images_sent === "number"
+          ? `${c.images_sent} ảnh${c.images_as_links ? `, ${c.images_as_links} thành link` : ""}` +
+            `${c.image_errors ? `, ${c.image_errors} lỗi` : ""}`
+          : null),
+        meta("Lỗi", c.error),
+        meta("Thời gian xử lý", [
+          typeof c.duration_ms === "number" ? `tổng ${fmtNum.format(c.duration_ms)} ms` : "",
+          typeof c.ai_ms === "number" ? `AI ${fmtNum.format(c.ai_ms)} ms` : "",
+          typeof c.fetch_ms === "number" ? `tải ảnh ${fmtNum.format(c.fetch_ms)} ms` : "",
+        ].filter(Boolean).join(", ") || null),
+        c.reply_text
+          ? h("div", { class: "quote" }, c.reply_text)
+          : h("p", { class: "muted" }, "Bot không gửi tin nào."),
+        item ? h("div", { class: "actions" },
+          h("button", { class: "btn", onclick: () => itemEditor({
+            slug: c.matched_slug, form: itemToForm(c.matched_slug, item), onDone: () => go("history"),
+          }) }, "Mở mục")) : null,
+      ),
+    ) : null,
+  );
+  return card;
+}
+
+function piiViewsCard() {
+  const body = h("div", { class: "muted" }, "Đang tải…");
+  const box = h("details", { class: "card" }, h("summary", {}, "Nhật ký xem thông tin cá nhân (20 lần gần nhất)"), body);
+  box.addEventListener("toggle", async () => {
+    if (!box.open || box.dataset.loaded) return;
+    box.dataset.loaded = "1";
+    try {
+      const snap = await getDocs(query(collection(db, "pii_views"), orderBy("viewed_at", "desc"), limit(20)));
+      body.replaceChildren(snap.empty
+        ? h("p", {}, "Chưa có lần xem nào.")
+        : h("div", { class: "scroll" }, h("table", {},
+          h("tr", {}, h("th", {}, "Thời gian"), h("th", {}, "Người xem"), h("th", {}, "Mã tin")),
+          snap.docs.map((d) => h("tr", {},
+            h("td", {}, when(d.data().viewed_at)), h("td", {}, d.data().viewed_by ?? ""),
+            h("td", {}, d.data().conversation_id ?? ""))))));
+    } catch (e) {
+      body.replaceChildren(msg("bad", errText(e)));
+    }
+  });
+  return box;
+}
 
 // ---------- Màn: Câu chưa trả lời ----------
 async function renderUnanswered(notice) {
@@ -1580,6 +2001,9 @@ async function renderSettings(notice) {
   const imageSummary = h("input", {
     type: "checkbox", checked: f.image_summary_enabled, onchange: (e) => (f.image_summary_enabled = e.target.checked),
   });
+  const imageText = h("input", {
+    type: "checkbox", checked: f.image_text_enabled, onchange: (e) => (f.image_text_enabled = e.target.checked),
+  });
   const imageLimit = h("input", {
     type: "number", min: 0, max: MAX_IMAGE_AI_LIMIT, step: 1, value: f.monthly_image_ai_limit, style: "max-width:140px",
   });
@@ -1633,6 +2057,8 @@ async function renderSettings(notice) {
       h("label", { class: "row f" }, imageAi, "Bật đọc ảnh (image_ai_enabled; cần bật cả ai_enabled)"),
       h("label", { class: "row f" }, imageSummary,
         "Lưu mô tả ngắn của ảnh cho màn Chưa trả lời (image_summary_enabled; không gửi người dùng)"),
+      h("label", { class: "row f" }, imageText,
+        "Chép chữ trên ảnh cho màn Lịch sử (image_text_enabled; thông tin cá nhân ẩn mặc định, lưu 90 ngày)"),
       h("label", { class: "f" }, "Hạn mức đọc ảnh mỗi tháng",
         h("span", { class: "hint" }, ` 0-${fmtNum.format(MAX_IMAGE_AI_LIMIT)}; vẫn tính vào hạn mức AI chung`)),
       imageLimit,
