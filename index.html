@@ -145,7 +145,14 @@ const BOT_DEFAULTS = {
   monthly_ai_call_limit: 6000,
   ai_model: "claude-haiku-5-5",
   max_images_per_answer: 4,
+  // Bước F: đọc ảnh người dùng gửi.
+  image_ai_enabled: false,
+  monthly_image_ai_limit: 300,
+  image_quota_message: "Bot tạm không đọc được ảnh, bạn gõ câu hỏi bằng chữ giúp nhé.",
+  image_summary_enabled: true,
 };
+const MAX_IMAGE_AI_LIMIT = 10000;
+const MAX_IMAGE_QUOTA_MESSAGE_CHARS = 500;
 // USD / 1 triệu token, giống scripts/kb/lib/eval.mjs.
 const PRICES = {
   "claude-haiku-5-5": { input: 0.1, output: 0.5 },
@@ -157,7 +164,16 @@ const REASON_LABELS = {
   low_confidence: "AI không chắc",
   ai_error: "Lỗi AI",
   ai_quota: "Hết hạn mức AI",
+  image_quota: "Hết hạn mức đọc ảnh",
+  image_fetch_error: "Không tải được ảnh",
 };
+const IMAGE_TAG = "[Ảnh] ";
+
+/** Mẫu câu từ tin ảnh có tiền tố "[Ảnh] "; bỏ tiền tố khi dùng làm cách hỏi. */
+function stripImageTag(s) {
+  const t = String(s ?? "");
+  return t.startsWith(IMAGE_TAG) ? t.slice(IMAGE_TAG.length).trim() : t;
+}
 const STATUS_LABELS = { draft: "Nháp", approved: "Đã duyệt", hidden: "Đã ẩn" };
 const PLATFORM_LABEL = { youtube: "YouTube", facebook: "Facebook", drive: "Drive", other: "Liên kết" };
 
@@ -506,6 +522,19 @@ function settingsFromConfig(raw) {
         ? r.max_images_per_answer
         : BOT_DEFAULTS.max_images_per_answer,
     ),
+    image_ai_enabled: typeof r.image_ai_enabled === "boolean" ? r.image_ai_enabled : BOT_DEFAULTS.image_ai_enabled,
+    image_summary_enabled: typeof r.image_summary_enabled === "boolean"
+      ? r.image_summary_enabled
+      : BOT_DEFAULTS.image_summary_enabled,
+    monthly_image_ai_limit: String(
+      Number.isInteger(r.monthly_image_ai_limit) && r.monthly_image_ai_limit >= 0
+        && r.monthly_image_ai_limit <= MAX_IMAGE_AI_LIMIT
+        ? r.monthly_image_ai_limit
+        : BOT_DEFAULTS.monthly_image_ai_limit,
+    ),
+    image_quota_message: typeof r.image_quota_message === "string" && r.image_quota_message.trim()
+      ? r.image_quota_message
+      : BOT_DEFAULTS.image_quota_message,
     chats: ids.map((id) => ({ id, label: typeof labels[id] === "string" ? labels[id] : "" })),
   };
 }
@@ -524,6 +553,16 @@ function validateSettings(f) {
   const maxImages = Number(maxImagesText);
   if (!/^\d+$/.test(maxImagesText) || maxImages > MAX_IMAGES) {
     errors.push(`Số ảnh mỗi câu trả lời phải là số nguyên từ 0 đến ${MAX_IMAGES}`);
+  }
+  const imageLimitText = String(f.monthly_image_ai_limit ?? BOT_DEFAULTS.monthly_image_ai_limit).trim();
+  const imageLimit = Number(imageLimitText);
+  if (!/^\d+$/.test(imageLimitText) || imageLimit > MAX_IMAGE_AI_LIMIT) {
+    errors.push(`Hạn mức đọc ảnh phải là số nguyên từ 0 đến ${MAX_IMAGE_AI_LIMIT}`);
+  }
+  const imageQuota = cleanText(f.image_quota_message ?? BOT_DEFAULTS.image_quota_message);
+  if (!imageQuota) errors.push("Tin khi hết hạn mức đọc ảnh trống");
+  else if (charLength(imageQuota) > MAX_IMAGE_QUOTA_MESSAGE_CHARS) {
+    errors.push(`Tin khi hết hạn mức đọc ảnh tối đa ${MAX_IMAGE_QUOTA_MESSAGE_CHARS} ký tự`);
   }
   const ids = [];
   const labels = {};
@@ -556,6 +595,10 @@ function validateSettings(f) {
       confidence_threshold: threshold,
       handoff_message: handoff,
       max_images_per_answer: maxImages,
+      image_ai_enabled: !!f.image_ai_enabled,
+      image_summary_enabled: !!(f.image_summary_enabled ?? BOT_DEFAULTS.image_summary_enabled),
+      monthly_image_ai_limit: imageLimit,
+      image_quota_message: imageQuota,
       allowed_chat_ids: ids,
       chat_labels: labels,
     },
@@ -585,11 +628,14 @@ function lastNDays(n, now = new Date()) {
 function summarizeStats(docs, days) {
   const byId = new Map(docs.map((d) => [d.id, d.data ?? {}]));
   const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
-  const totals = { questions: 0, answered: 0, handoff: 0, ai_errors: 0 };
+  const totals = { questions: 0, answered: 0, handoff: 0, ai_errors: 0, image_questions: 0 };
   const hits = new Map();
   const rows = days.map((day) => {
     const d = byId.get(day) ?? {};
-    const row = { day, questions: num(d.questions), answered: num(d.answered), handoff: num(d.handoff), ai_errors: num(d.ai_errors) };
+    const row = {
+      day, questions: num(d.questions), answered: num(d.answered), handoff: num(d.handoff), ai_errors: num(d.ai_errors),
+      image_questions: num(d.image_questions),
+    };
     for (const k of Object.keys(totals)) totals[k] += row[k];
     for (const [slug, v] of Object.entries(d.item_hits ?? {})) hits.set(slug, (hits.get(slug) ?? 0) + num(v));
     return row;
@@ -889,11 +935,19 @@ async function renderUnanswered(notice) {
 }
 
 function unansweredCard(id, u) {
-  const samples = (u.samples ?? []).filter((s) => typeof s === "string");
+  const shown = (u.samples ?? []).filter((s) => typeof s === "string");
+  // Bỏ tiền tố "[Ảnh] " khi dùng mẫu làm cách hỏi.
+  const samples = [...new Set(shown.map(stripImageTag).filter(Boolean))];
   const guess = u.best_guess_slug ? state.kb.get(u.best_guess_slug) : null;
+  const isImage = u.source === "image";
+  const summary = isImage && typeof u.image_summary === "string" ? u.image_summary : "";
   return h("div", { class: "card" },
-    samples.map((s) => h("p", { class: "sample" }, `“${s}”`)),
+    shown.map((s) => h("p", { class: "sample" }, `“${s}”`)),
+    summary && !shown.some((s) => s.includes(summary))
+      ? h("p", { class: "muted", style: "margin:4px 0 0" }, `Ảnh mới nhất (AI mô tả): ${summary}`)
+      : null,
     h("div", { class: "row muted", style: "margin-top:6px" },
+      isImage ? h("span", { class: "chip", title: "Người dùng gửi ảnh; ảnh không được lưu" }, "Ảnh") : null,
       h("span", { class: "chip" }, `Hỏi ${fmtNum.format(u.count ?? 0)} lần`),
       h("span", {}, `Lần cuối: ${when(u.last_asked_at)}`),
       h("span", {}, `Lý do: ${REASON_LABELS[u.reason] ?? u.reason ?? "-"}`),
@@ -1406,6 +1460,10 @@ async function renderStats() {
   const model = typeof cfg.ai_model === "string" ? cfg.ai_model : BOT_DEFAULTS.ai_model;
   const sent = usage.messages_sent ?? 0;
   const aiCalls = usage.ai_calls ?? 0;
+  const imageLimit = Number.isInteger(cfg.monthly_image_ai_limit)
+    ? cfg.monthly_image_ai_limit
+    : BOT_DEFAULTS.monthly_image_ai_limit;
+  const imageCalls = usage.image_ai_calls ?? 0;
   const cost = estimateCost(model, usage.ai_input_tokens ?? 0, usage.ai_output_tokens ?? 0);
 
   const meter = (a, b) => {
@@ -1432,6 +1490,12 @@ async function renderStats() {
       tile("Lỗi AI", fmtNum.format(usage.ai_errors ?? 0)),
       tile("Token vào / ra", `${fmtNum.format(usage.ai_input_tokens ?? 0)} / ${fmtNum.format(usage.ai_output_tokens ?? 0)}`),
       tile("Chi phí AI ước tính", cost === null ? "-" : `$${cost.toFixed(3)}`, h("span", { class: "muted" }, model)),
+      tile("Lượt đọc ảnh", `${fmtNum.format(imageCalls)} / ${fmtNum.format(imageLimit)}`, meter(imageCalls, imageLimit)),
+      tile("Token ảnh vào / ra",
+        `${fmtNum.format(usage.image_input_tokens ?? 0)} / ${fmtNum.format(usage.image_output_tokens ?? 0)}`,
+        h("span", { class: "muted" },
+          `đã tính trong token chung; lỗi AI ảnh: ${fmtNum.format(usage.image_ai_errors ?? 0)}, `
+          + `lỗi tải ảnh: ${fmtNum.format(usage.image_fetch_errors ?? 0)}`)),
     ),
     h("div", { class: "row", style: "margin:18px 0 8px" }, h("h2", { class: "grow", style: "margin:0" }, "Câu hỏi qua AI"), rangeSel),
     h("div", { class: "tiles" },
@@ -1439,6 +1503,7 @@ async function renderStats() {
       tile("Bot tự trả lời", `${fmtNum.format(s.totals.answered)} (${pct(s.autoRate)})`),
       tile("Chuyển ca", fmtNum.format(s.totals.handoff)),
       tile("Lỗi AI", fmtNum.format(s.totals.ai_errors)),
+      tile("Câu hỏi bằng ảnh", fmtNum.format(s.totals.image_questions)),
     ),
     h("p", { class: "muted" }, "Chỉ tính câu đi qua luồng AI (khi ai_enabled bật). Số liệu tổng của mọi nhóm."),
     h("div", { class: "card" },
@@ -1510,6 +1575,17 @@ async function renderSettings(notice) {
     type: "number", min: 0, max: MAX_IMAGES, step: 1, value: f.max_images_per_answer, style: "max-width:140px",
   });
   maxImages.addEventListener("input", () => (f.max_images_per_answer = maxImages.value));
+  // Bước F: đọc ảnh người dùng gửi.
+  const imageAi = h("input", { type: "checkbox", checked: f.image_ai_enabled, onchange: (e) => (f.image_ai_enabled = e.target.checked) });
+  const imageSummary = h("input", {
+    type: "checkbox", checked: f.image_summary_enabled, onchange: (e) => (f.image_summary_enabled = e.target.checked),
+  });
+  const imageLimit = h("input", {
+    type: "number", min: 0, max: MAX_IMAGE_AI_LIMIT, step: 1, value: f.monthly_image_ai_limit, style: "max-width:140px",
+  });
+  imageLimit.addEventListener("input", () => (f.monthly_image_ai_limit = imageLimit.value));
+  const imageQuota = h("textarea", { rows: 2, value: f.image_quota_message });
+  imageQuota.addEventListener("input", () => (f.image_quota_message = imageQuota.value));
 
   const save = async () => {
     const { data, errors } = validateSettings(f);
@@ -1519,6 +1595,10 @@ async function renderSettings(notice) {
     if (data.ai_enabled && !before.ai_enabled) warns.push("Bật AI: bot sẽ trả lời bằng nội dung trong kho đã duyệt.");
     if (!data.ai_enabled && before.ai_enabled) warns.push("Tắt AI: bot quay về trả lời kiểu giai đoạn 1.");
     if (!data.reply_enabled && before.reply_enabled) warns.push("Tắt trả lời: bot sẽ không gửi tin nào.");
+    if (data.image_ai_enabled && !before.image_ai_enabled) {
+      warns.push("Bật đọc ảnh: ảnh có gọi tên bot sẽ được gửi cho dịch vụ AI (Anthropic) để đọc; bot không lưu ảnh."
+        + (data.ai_enabled ? "" : " Cần bật cả ai_enabled thì mới có tác dụng."));
+    }
     const removed = before.chats.filter((c) => !data.allowed_chat_ids.includes(c.id));
     if (removed.length) warns.push(`Bỏ ${removed.length} nhóm khỏi danh sách: bot sẽ không trả lời các nhóm đó.`);
     if (!data.allowed_chat_ids.length) warns.push("Danh sách nhóm trống: bot sẽ không trả lời nhóm nào.");
@@ -1544,6 +1624,21 @@ async function renderSettings(notice) {
       h("label", { class: "f" }, "Số ảnh gửi mỗi câu trả lời",
         h("span", { class: "hint" }, ` 0-${MAX_IMAGES}; mỗi ảnh tính 1 tin; ảnh vượt số này thành link; 0 = không gửi ảnh`)),
       maxImages,
+    ),
+    h("div", { class: "card" },
+      h("h3", { style: "margin-top:0" }, "Đọc ảnh người dùng gửi"),
+      h("p", { class: "muted" },
+        "Chỉ đọc ảnh có gọi tên bot trong chú thích. Ảnh được gửi cho dịch vụ AI để chọn mục trong kho; ",
+        "bot không lưu ảnh và vẫn chỉ gửi nội dung đã duyệt."),
+      h("label", { class: "row f" }, imageAi, "Bật đọc ảnh (image_ai_enabled; cần bật cả ai_enabled)"),
+      h("label", { class: "row f" }, imageSummary,
+        "Lưu mô tả ngắn của ảnh cho màn Chưa trả lời (image_summary_enabled; không gửi người dùng)"),
+      h("label", { class: "f" }, "Hạn mức đọc ảnh mỗi tháng",
+        h("span", { class: "hint" }, ` 0-${fmtNum.format(MAX_IMAGE_AI_LIMIT)}; vẫn tính vào hạn mức AI chung`)),
+      imageLimit,
+      h("label", { class: "f" }, "Tin khi hết hạn mức đọc ảnh",
+        h("span", { class: "hint" }, ` tối đa ${MAX_IMAGE_QUOTA_MESSAGE_CHARS} ký tự`)),
+      imageQuota,
     ),
     h("div", { class: "card" },
       h("h3", { style: "margin-top:0" }, "Nhóm Zalo được phép"),
