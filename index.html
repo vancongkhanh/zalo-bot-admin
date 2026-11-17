@@ -670,6 +670,33 @@ function summarizeStats(docs, days) {
   return { rows, totals, topItems, autoRate };
 }
 
+/** Quy USD ra VND theo tỷ giá; làm tròn đến đồng. Thiếu số liệu thì null. */
+function usdToVnd(usd, rate) {
+  if (typeof usd !== "number" || !Number.isFinite(usd) || usd < 0) return null;
+  if (typeof rate !== "number" || !Number.isFinite(rate) || rate <= 0) return null;
+  return Math.round(usd * rate);
+}
+
+/** "11/17/2026 11:43:14 AM" (giờ Việt Nam, kiểu Mỹ) → "11:43 17/11/2026"; sai mẫu thì giữ nguyên. */
+function vcbTime(s) {
+  if (typeof s !== "string" || !s.trim()) return "";
+  const m = s.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4}) (\d{1,2}):(\d{2})(?::\d{2})? ?(AM|PM)?$/i);
+  if (!m) return s.trim().slice(0, 40);
+  let hh = Number(m[4]);
+  if (m[6]) hh = (hh % 12) + (m[6].toUpperCase() === "PM" ? 12 : 0);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(hh)}:${m[5]} ${p(m[2])}/${p(m[1])}/${m[3]}`;
+}
+
+/** Dòng ghi nguồn tỷ giá dưới ô chi phí. */
+function fxNote(fx) {
+  if (!fx || typeof fx.rate !== "number") return "";
+  const rate = new Intl.NumberFormat("vi-VN").format(Math.round(fx.rate));
+  const t = vcbTime(fx.source_time);
+  const when = t ? ` (cập nhật ${t})` : "";
+  return `Giá bán USD ${fx.source ?? "Vietcombank"}: ${rate} đ${when}${fx.stale ? "; tạm dùng tỷ giá cũ" : ""}`;
+}
+
 function estimateCost(model, inputTokens, outputTokens) {
   const p = PRICES[model];
   if (!p) return null;
@@ -996,6 +1023,16 @@ if (emulator) {
   connectStorageEmulator(storage, "127.0.0.1", 9199);
 }
 // Hàm gợi ý cách hỏi (cùng vùng với zaloWebhook). Emulator không chạy hàm: trả gợi ý giả để xem giao diện.
+// Tỷ giá bán USD Vietcombank (hàm usdVndRate đọc giúp, đệm 6 giờ). Emulator: tỷ giá giả.
+const usdVndCall = emulator
+  ? async () => ({ data: { rate: 26350, source: "Vietcombank (giả)", rate_type: "sell", source_time: "11/17/2026 11:43:14 AM" } })
+  : httpsCallable(getFunctions(app, "asia-southeast1"), "usdVndRate", { timeout: 25000 });
+let fxCache = null;
+async function getFx() {
+  if (!fxCache) fxCache = usdVndCall({}).then((r) => r.data).catch((e) => ((fxCache = null), Promise.reject(e)));
+  return fxCache;
+}
+
 const suggestCall = emulator
   ? async ({ title }) => {
     await new Promise((r) => setTimeout(r, 400));
@@ -1909,6 +1946,23 @@ async function renderKb(notice) {
 // ---------- Màn: Thống kê ----------
 let statsDays = 30;
 
+/** Dòng quy ra VND dưới ô chi phí, điền sau khi có tỷ giá (không chặn màn Thống kê). */
+function vndBox(cost) {
+  if (cost === null) return null;
+  const value = h("div", { style: "font-weight:600" }, "≈ … đ");
+  const note = h("div", { class: "muted" }, "Đang lấy tỷ giá Vietcombank…");
+  getFx().then((fx) => {
+    const vnd = usdToVnd(cost, fx.rate);
+    value.textContent = vnd === null ? "-" : `≈ ${fmtNum.format(vnd)} đ`;
+    note.textContent = fxNote(fx);
+  }).catch((e) => {
+    console.error(e);
+    value.textContent = "≈ ? đ";
+    note.textContent = "Chưa lấy được tỷ giá Vietcombank, tải lại trang sau.";
+  });
+  return h("div", {}, value, note);
+}
+
 async function renderStats() {
   const now = new Date();
   const days = lastNDays(statsDays, now);
@@ -1956,7 +2010,8 @@ async function renderStats() {
       tile("Lượt gọi AI", `${fmtNum.format(aiCalls)} / ${fmtNum.format(aiLimit)}`, meter(aiCalls, aiLimit)),
       tile("Lỗi AI", fmtNum.format(usage.ai_errors ?? 0)),
       tile("Token vào / ra", `${fmtNum.format(usage.ai_input_tokens ?? 0)} / ${fmtNum.format(usage.ai_output_tokens ?? 0)}`),
-      tile("Chi phí AI ước tính", cost === null ? "-" : `$${cost.toFixed(3)}`, h("span", { class: "muted" }, model)),
+      tile("Chi phí AI ước tính", cost === null ? "-" : `$${cost.toFixed(3)}`,
+        h("div", {}, vndBox(cost), h("span", { class: "muted" }, model))),
       tile("Lượt đọc ảnh", `${fmtNum.format(imageCalls)} / ${fmtNum.format(imageLimit)}`, meter(imageCalls, imageLimit)),
       tile("Token ảnh vào / ra",
         `${fmtNum.format(usage.image_input_tokens ?? 0)} / ${fmtNum.format(usage.image_output_tokens ?? 0)}`,
