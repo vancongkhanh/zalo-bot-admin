@@ -23,6 +23,17 @@ export interface BotConfig {
   // Bước E
   /** Số ảnh tối đa gửi kèm một câu trả lời (0-10); ảnh còn lại thành link. */
   maxImagesPerAnswer: number;
+  // Bước F
+  /** Đọc ảnh người dùng gửi (có gọi tên bot) bằng AI. */
+  imageAiEnabled: boolean;
+  /** Số lượt đọc ảnh tối đa mỗi tháng; vẫn tính vào monthlyAiCallLimit. */
+  monthlyImageAiLimit: number;
+  /** Tin gửi khi hết hạn mức đọc ảnh. */
+  imageQuotaMessage: string;
+  /** AI trả thêm mô tả ngắn của ảnh, chỉ lưu cho quản trị. */
+  imageSummaryEnabled: boolean;
+  /** Bước G: AI chép chữ đọc được trên ảnh (thông tin cá nhân bọc ⟦…⟧), chỉ lưu cho quản trị. */
+  imageTextEnabled: boolean;
 }
 
 export const DEFAULT_CONFIG: BotConfig = {
@@ -38,6 +49,11 @@ export const DEFAULT_CONFIG: BotConfig = {
   handoffMessage: "Câu hỏi của anh/chị đã được ghi nhận, chuyên viên sẽ hỗ trợ sớm.",
   aiTimeoutMs: 15000,
   maxImagesPerAnswer: 4,
+  imageAiEnabled: false,
+  monthlyImageAiLimit: 300,
+  imageQuotaMessage: "Bot tạm không đọc được ảnh, bạn gõ câu hỏi bằng chữ giúp nhé.",
+  imageSummaryEnabled: true,
+  imageTextEnabled: true,
 };
 
 /** Giới hạn an toàn cho các trường bước C (hàm có timeout 60 giây). */
@@ -46,6 +62,9 @@ export const MODEL_PATTERN = /^claude-[a-z0-9-]{1,60}$/;
 export const MAX_HANDOFF_CHARS = 1000;
 /** Bước E: số ảnh gửi mỗi câu trả lời, và số ảnh tối đa của một mục. */
 export const MAX_IMAGES_PER_ITEM = 10;
+/** Bước F: giới hạn các trường đọc ảnh. */
+export const MAX_IMAGE_AI_LIMIT = 10000;
+export const MAX_IMAGE_QUOTA_MESSAGE_CHARS = 500;
 
 /** Tỷ lệ hạn mức để ghi cảnh báo. */
 export const QUOTA_WARNING_RATIO = 0.8;
@@ -152,6 +171,33 @@ export function parseConfig(raw: Record<string, unknown> | undefined): {
     config.maxImagesPerAnswer = maxImages;
   } else if (maxImages !== undefined) {
     warnings.push(`max_images_per_answer phải là số nguyên từ 0 đến ${MAX_IMAGES_PER_ITEM}`);
+  }
+
+  if (typeof raw.image_ai_enabled === "boolean") config.imageAiEnabled = raw.image_ai_enabled;
+  else if (raw.image_ai_enabled !== undefined) warnings.push("image_ai_enabled không phải boolean");
+
+  if (typeof raw.image_summary_enabled === "boolean") config.imageSummaryEnabled = raw.image_summary_enabled;
+  else if (raw.image_summary_enabled !== undefined) warnings.push("image_summary_enabled không phải boolean");
+
+  if (typeof raw.image_text_enabled === "boolean") config.imageTextEnabled = raw.image_text_enabled;
+  else if (raw.image_text_enabled !== undefined) warnings.push("image_text_enabled không phải boolean");
+
+  const imageLimit = raw.monthly_image_ai_limit;
+  if (typeof imageLimit === "number" && Number.isInteger(imageLimit) && imageLimit >= 0 && imageLimit <= MAX_IMAGE_AI_LIMIT) {
+    config.monthlyImageAiLimit = imageLimit;
+  } else if (imageLimit !== undefined) {
+    warnings.push(`monthly_image_ai_limit phải là số nguyên từ 0 đến ${MAX_IMAGE_AI_LIMIT}`);
+  }
+
+  const imageQuota = raw.image_quota_message;
+  if (
+    typeof imageQuota === "string" &&
+    imageQuota.trim() &&
+    Array.from(imageQuota.trim()).length <= MAX_IMAGE_QUOTA_MESSAGE_CHARS
+  ) {
+    config.imageQuotaMessage = imageQuota.trim();
+  } else if (imageQuota !== undefined) {
+    warnings.push("image_quota_message trống hoặc quá dài");
   }
 
   return { config, warnings };

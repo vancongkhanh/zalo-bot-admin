@@ -7,7 +7,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { assertFails, assertSucceeds, initializeTestEnvironment } from "@firebase/rules-unit-testing";
 import {
   collection, deleteDoc, doc, getDoc, getDocs, limit, orderBy, query, serverTimestamp, setDoc, updateDoc, where,
-  writeBatch, Timestamp,
+  writeBatch, Timestamp, or, and,
 } from "firebase/firestore";
 import { deleteObject, getDownloadURL, listAll, ref as sref, uploadBytes } from "firebase/storage";
 import { logic } from "./load-logic.mjs";
@@ -312,6 +312,36 @@ describe("bước E: config/main.max_images_per_answer", () => {
   });
 });
 
+describe("bước F: config/main đọc ảnh", () => {
+  const ref = () => doc(admin(), "config", "main");
+  const stamp = { updated_at: serverTimestamp(), updated_by: ADMIN.email };
+
+  it("màn Cài đặt ghi bốn trường đọc ảnh được", async () => {
+    const f = settingsFromConfig({ allowed_chat_ids: ["g1"] });
+    const { data } = validateSettings({
+      ...f,
+      image_ai_enabled: true,
+      image_summary_enabled: false,
+      monthly_image_ai_limit: "10000",
+      image_quota_message: "Gõ chữ giúp nhé",
+    });
+    expect(data).toMatchObject({ image_ai_enabled: true, monthly_image_ai_limit: 10000, image_summary_enabled: false });
+    await assertSucceeds(updateDoc(ref(), { ...data, ...stamp }));
+  });
+
+  it.each([
+    ["image_ai_enabled", "true"],
+    ["image_summary_enabled", 1],
+    ["monthly_image_ai_limit", 10001],
+    ["monthly_image_ai_limit", -1],
+    ["monthly_image_ai_limit", 2.5],
+    ["image_quota_message", ""],
+    ["image_quota_message", "x".repeat(501)],
+  ])("từ chối %s = %o", async (k, v) => {
+    await assertFails(updateDoc(ref(), { [k]: v, ...stamp }));
+  });
+});
+
 describe("E6: Storage kb_images", () => {
   const st = (ctx) => ctx.storage();
   const adminSt = () => st(env.authenticatedContext(ADMIN.uid, { email: ADMIN.email }));
@@ -357,5 +387,68 @@ describe("E6: Storage kb_images", () => {
     await assertFails(uploadBytes(sref(adminSt(), "kb_images/ky-so/z.jpg"), bytes(20), jpeg));
     await assertFails(deleteObject(sref(adminSt(), "kb_images/ky-so/z.jpg")));
     await assertFails(listAll(sref(adminSt(), "kb_images/ky-so")));
+  });
+});
+
+// Bước G: dựng truy vấn giống renderHistory (trang dùng cùng historyClauses/historySince).
+function historyQuery(db, { kind, since, chatId, pageSize }) {
+  const ors = logic.historyClauses(kind).map(([f, v]) => where(f, "in", v));
+  const conds = [where("created_at", ">=", since)];
+  if (chatId) conds.push(where("chat_id", "==", chatId));
+  conds.push(ors.length > 1 ? or(...ors) : ors[0]);
+  return query(collection(db, "conversations"), and(...conds), orderBy("created_at", "desc"), limit(pageSize));
+}
+
+describe("bước G: lịch sử hỗ trợ và nhật ký xem thông tin cá nhân", () => {
+  const view = (o = {}) => ({ conversation_id: "m1", viewed_by: ADMIN.email, viewed_at: serverTimestamp(), ...o });
+
+  it("admin truy vấn được lịch sử (or outcome/ignore_reason, theo created_at)", async () => {
+    const q = historyQuery(admin(), { kind: "all", since: Timestamp.fromMillis(0), chatId: null, pageSize: 50 });
+    await assertSucceeds(getDocs(q));
+  });
+
+  it("người ngoài và chưa đăng nhập không truy vấn được lịch sử", async () => {
+    for (const db of [outsider(), anon()]) {
+      const q = historyQuery(db, { kind: "answered", since: Timestamp.fromMillis(0), chatId: null, pageSize: 50 });
+      await assertFails(getDocs(q));
+    }
+  });
+
+  it("admin ghi được một lần xem, đúng email và giờ máy chủ", async () => {
+    await assertSucceeds(setDoc(doc(admin(), "pii_views", "v1"), view()));
+    await assertSucceeds(getDoc(doc(admin(), "pii_views", "v1")));
+  });
+
+  it.each([
+    ["email người khác", { viewed_by: "khac@example.com" }],
+    ["giờ do máy khách đặt", { viewed_at: Timestamp.fromMillis(0) }],
+    ["bản ghi hội thoại không tồn tại", { conversation_id: "khong-co" }],
+    ["thêm trường lạ", { ghi_chu: "x" }],
+    ["thiếu conversation_id", { conversation_id: "" }],
+  ])("từ chối ghi lần xem: %s", async (_n, o) => {
+    await assertFails(setDoc(doc(admin(), "pii_views", "v1"), view(o)));
+  });
+
+  it("không ai sửa hay xóa lần xem; người ngoài không ghi, không đọc được", async () => {
+    await assertSucceeds(setDoc(doc(admin(), "pii_views", "v1"), view()));
+    await assertFails(updateDoc(doc(admin(), "pii_views", "v1"), { viewed_by: ADMIN.email }));
+    await assertFails(deleteDoc(doc(admin(), "pii_views", "v1")));
+    await assertFails(setDoc(doc(outsider(), "pii_views", "v2"), view({ viewed_by: "x@example.com" })));
+    await assertFails(getDoc(doc(outsider(), "pii_views", "v1")));
+    await assertFails(getDoc(doc(anon(), "pii_views", "v1")));
+  });
+
+  it("admin vẫn không ghi được conversations", async () => {
+    await assertFails(updateDoc(doc(admin(), "conversations", "m1"), { question: "y" }));
+    await assertFails(deleteDoc(doc(admin(), "conversations", "m1")));
+  });
+
+  it("Cài đặt ghi được image_text_enabled, từ chối sai kiểu", async () => {
+    const ref = doc(admin(), "config", "main");
+    const stamp = { updated_at: serverTimestamp(), updated_by: ADMIN.email };
+    const { data } = validateSettings({ ...settingsFromConfig({ allowed_chat_ids: ["g1"] }), image_text_enabled: false });
+    expect(data.image_text_enabled).toBe(false);
+    await assertSucceeds(updateDoc(ref, { ...data, ...stamp }));
+    await assertFails(updateDoc(ref, { image_text_enabled: "false", ...stamp }));
   });
 });

@@ -27,9 +27,12 @@ firestore.rules           quy tắc: chỉ admins/{uid} đọc/ghi qua trang qu�
 storage.rules             quy tắc Storage (bước E): admins tải ảnh vào kb_images/{slug}/, không ghi đè, không xóa
 firestore.indexes.json    chỉ mục unanswered; TTL cho processed_events.expire_at, conversations.expire_at
 functions/src/
-  index.ts       hàm zaloWebhook: nối secrets, Firestore, logger, Anthropic vào luồng xử lý
-  webhook.ts     luồng xử lý chính (giai đoạn 1, bước C, ảnh bước E)
-  selector.ts    gọi Claude chọn mục: trả {slug, confidence}, kiểm tra đầu ra
+  index.ts       hàm zaloWebhook (nối secrets, Firestore, logger, Anthropic vào luồng xử lý), suggestQuestions và usdVndRate
+  suggest.ts     trang quản trị: AI gợi ý "cách hỏi" cho một mục (chỉ admins gọi được; gợi ý không gửi người dùng Zalo)
+  webhook.ts     luồng xử lý chính (giai đoạn 1, bước C, ảnh bước E, đọc ảnh người dùng bước F)
+  selector.ts    gọi Claude chọn mục: trả {slug, confidence}, kiểm tra đầu ra; bước F: chọn mục từ ảnh (+ mô tả cho quản trị)
+  fxRate.ts      tỷ giá bán USD Vietcombank cho ô chi phí AI (đọc XML công khai, đệm 6 giờ ở fx_rates/usd_vnd; chỉ admins gọi)
+  imageFetch.ts  bước F: tải ảnh người dùng từ photo_url (https, ≤ 5 MB, 10 giây, nhận dạng JPEG/PNG/WebP/GIF), không lưu
   kb.ts          mục kho, ghép câu trả lời + link, chọn ảnh gửi/thành link, chuẩn hóa câu hỏi cho unanswered
   zaloClient.ts  sendMessage, sendPhoto, setWebhook, deleteWebhook, getMe, getWebhookInfo
   mention.ts     cắt @tên bot
@@ -90,11 +93,16 @@ Sau khi đổi secret phải **triển khai lại** (`firebase deploy --only fun
 | `handoff_message` | string | Tin chuyển ca (tối đa 1.000 ký tự) |
 | `ai_timeout_ms` | number | Mặc định `15000`, cho phép 1.000-50.000 |
 | `max_images_per_answer` | number | Bước E. Mặc định `4`, số nguyên 0-10. Số ảnh gửi kèm một câu trả lời (mỗi ảnh tính 1 tin); ảnh còn lại thành link trong tin chữ; `0` = không gửi ảnh |
+| `image_ai_enabled` | boolean | Bước F. Mặc định `false`. `true` (cùng `ai_enabled`): đọc ảnh có gọi tên bot trong chú thích bằng AI để chọn mục |
+| `monthly_image_ai_limit` | number | Bước F. Mặc định `300`, số nguyên 0-10.000. Lượt đọc ảnh mỗi tháng; vẫn tính vào `monthly_ai_call_limit` |
+| `image_quota_message` | string | Bước F. Tin gửi khi hết hạn mức đọc ảnh (tối đa 500 ký tự) |
+| `image_summary_enabled` | boolean | Bước F. Mặc định `true`: AI trả thêm mô tả ngắn của ảnh, chỉ lưu cho quản trị, không gửi người dùng |
+| `image_text_enabled` | boolean | Bước G. Mặc định `true`: AI chép chữ đọc được trên ảnh (tối đa 1.000 ký tự, thông tin cá nhân bọc `⟦…⟧`) vào `conversations.image_text`, chỉ quản trị xem trên màn Lịch sử, không gửi người dùng, không ghi log |
 | `updated_at`, `updated_by` | | Trang quản trị ghi khi lưu Cài đặt |
 
 Giá trị sai kiểu hoặc ngoài khoảng: hàm dùng mặc định và ghi cảnh báo "Cấu hình config/main". Hàm đọc lại cấu hình ở mỗi yêu cầu: sửa trong Console hoặc trang quản trị là có hiệu lực từ tin tiếp theo.
 
-**Tắt AI khẩn cấp:** đặt `ai_enabled` = `false` (trang quản trị > Cài đặt, hoặc Firestore Console). Không cần triển khai lại.
+**Tắt AI khẩn cấp:** đặt `ai_enabled` = `false` (trang quản trị > Cài đặt, hoặc Firestore Console). Không cần triển khai lại. Chỉ tắt đọc ảnh: `image_ai_enabled` = `false`.
 
 ## Luồng xử lý một câu hỏi
 
@@ -106,15 +114,18 @@ Giá trị sai kiểu hoặc ngoài khoảng: hàm dùng mặc định và ghi c
 5. Không có slug, dưới ngưỡng, lỗi/hết giờ AI, hết hạn mức AI: gửi `handoff_message`, ghi `unanswered`.
 6. Ghi `conversations`, `usage`, `stats_daily`, `hit_count`. Luôn trả HTTP 200.
 
+**Tin ảnh (bước F, `message.image.received`):** chỉ xử lý khi chú thích có `@tên bot`, `ai_enabled` và `image_ai_enabled` cùng bật; nếu không thì `ignored` (`no_mention`, `image_ai_disabled`), không tải ảnh, không gọi AI. Hết `monthly_image_ai_limit` hoặc `monthly_ai_call_limit`: gửi `image_quota_message`. Hàm tải ảnh từ `photo_url` vào bộ nhớ (lỗi: gửi `handoff_message`, lý do `image_fetch_error`), gửi Claude ảnh base64 kèm chú thích đã cắt tên bot. Đầu ra `{slug, confidence, mo_ta, noi_dung_anh}` được kiểm tra như câu chữ; từ đó giống hệt bước 4-6. **Không lưu ảnh.** Bước G2: tin ảnh có gọi tên bot được lưu `photo_url` (link https của Zalo) vào `conversations` để quản trị xem lại; không bao giờ ghi vào log, `unanswered` hay gửi đi đâu khác. Spec: [spec/spec-buoc-F-doc-anh.md](spec/spec-buoc-F-doc-anh.md).
+
 ## Dữ liệu trong Firestore
 
 | Nơi | Nội dung |
 |---|---|
 | `processed_events/{message_id}` | `received_at`, `state` (`processing`/`done`/`failed`), `expire_at` (+7 ngày, TTL tự xóa) |
-| `conversations/{message_id}` | `chat_id`, `from_id`, `display_name`, `question`, `reply_text`, `outcome` (`replied`/`ignored`/`error`/`answered`/`handoff`), `ignore_reason`, `error`, `duration_ms`, `created_at`, `expire_at` (+90 ngày, TTL). Khi qua AI thêm `matched_slug`, `confidence`, `reason` (`no_match`/`low_confidence`/`ai_error`/`ai_quota`), `ai_ms`, `send_ok`. Mục có ảnh thêm `images_sent`, `image_errors`, `images_as_links` |
-| `usage/{YYYY-MM}` | `messages_sent` (đếm mọi lần gọi `sendMessage` và `sendPhoto`, kể cả lỗi), `send_errors`, `photos_sent`, `photo_errors`, `quota_warning_sent`, `ai_calls`, `ai_errors`, `ai_input_tokens`, `ai_output_tokens` (tháng theo giờ Việt Nam) |
-| `stats_daily/{YYYY-MM-DD}` | `questions`, `answered`, `handoff`, `ai_errors`, `photos_sent`, `item_hits.{slug}` (ngày theo giờ Việt Nam; chung mọi nhóm) |
-| `unanswered/{id}` | Câu chuyển ca gộp theo câu đã chuẩn hóa (bỏ dấu, chữ thường). `cluster_key`, `samples` (≤ 3), `count`, `first_asked_at`, `last_asked_at`, `reason`, `best_guess_slug`, `best_guess_confidence`, `status` (`new`/`answered`/`ignored`), `answered_slug`, `answered_at`, `handled_by`. Không lưu mã người dùng. Hỏi lại câu đã xử lý mà bot vẫn chuyển ca thì về lại `new` |
+| `conversations/{message_id}` | `chat_id`, `from_id`, `display_name`, `question`, `reply_text`, `outcome` (`replied`/`ignored`/`error`/`answered`/`handoff`), `ignore_reason`, `error`, `duration_ms`, `created_at`, `expire_at` (+90 ngày, TTL). Khi qua AI thêm `matched_slug`, `confidence`, `reason` (`no_match`/`low_confidence`/`ai_error`/`ai_quota`/`image_quota`/`image_fetch_error`), `ai_ms`, `send_ok`. Mục có ảnh thêm `images_sent`, `image_errors`, `images_as_links`. Tin ảnh (bước F) thêm `source: "image"`, `image_bytes`, `image_type`, `image_summary`, `fetch_ms`; bước G thêm `image_text` (chữ trên ảnh, thông tin cá nhân bọc `⟦…⟧`); bước G2 thêm `photo_url` (chỉ tin ảnh có gọi tên bot, link https ≤ 2.000 ký tự, nếu không thì `null`) |
+| `usage/{YYYY-MM}` | `messages_sent` (đếm mọi lần gọi `sendMessage` và `sendPhoto`, kể cả lỗi), `send_errors`, `photos_sent`, `photo_errors`, `suggest_calls`, `suggest_errors`, `suggest_input_tokens`, `suggest_output_tokens` (nút gợi ý cách hỏi; không tính vào hạn mức AI của bot), `quota_warning_sent`, `ai_calls`, `ai_errors`, `ai_input_tokens`, `ai_output_tokens` (gồm cả lượt đọc ảnh), `image_ai_calls`, `image_ai_errors`, `image_input_tokens`, `image_output_tokens`, `image_fetch_errors` (bước F) (tháng theo giờ Việt Nam) |
+| `stats_daily/{YYYY-MM-DD}` | `questions`, `answered`, `handoff`, `ai_errors`, `photos_sent`, `image_questions` (bước F), `item_hits.{slug}` (ngày theo giờ Việt Nam; chung mọi nhóm) |
+| `pii_views/{auto}` | Bước G. Mỗi lần quản trị bấm "Hiện thông tin cá nhân" trên màn Lịch sử: `conversation_id`, `viewed_by`, `viewed_at`. Chỉ thêm, không sửa, không xóa |
+| `unanswered/{id}` | Câu chuyển ca gộp theo câu đã chuẩn hóa (bỏ dấu, chữ thường). `cluster_key`, `samples` (≤ 3), `count`, `first_asked_at`, `last_asked_at`, `reason`, `best_guess_slug`, `best_guess_confidence`, `status` (`new`/`answered`/`ignored`), `answered_slug`, `answered_at`, `handled_by`. Tin ảnh (bước F): `source: "image"`, `image_summary`, mẫu có tiền tố `[Ảnh] `; ảnh không chú thích thì mỗi tin một bản ghi `img_{message_id}`. Không lưu mã người dùng. Hỏi lại câu đã xử lý mà bot vẫn chuyển ca thì về lại `new` |
 | `kb_items/{slug}` | `title`, `topic`, `questions[]`, `answer` (≤ 1.500 ký tự), `links[]` (`label`, `url`, `platform`), `keywords[]`, `source`, `status` (`draft`/`approved`/`hidden`), `version`, `hit_count`, `last_hit_at`, `steps[]` (chừa cho nhập PDF), `images[]` (bước E: `url`, `path`, `caption`, `width`, `height`, `bytes`; tối đa 10; chỉ tải từ trang quản trị), `image_urls[]` (cũ, không còn ghi), `created_at`, `updated_at`, `updated_by`, `approved_at`, `approved_by`. Bot chỉ dùng `approved` |
 | `eval_testset/t-NN` | Bộ thử cho `eval-run` (`stt`, `question`, `expected_slug`); bot không đọc |
 | `admins/{uid}` | Tài khoản được dùng trang quản trị (bạn tạo thủ công) |
@@ -127,10 +138,10 @@ Nhóm không có trong danh sách: không ghi `conversations`, chỉ ghi dòng C
 
 | Phần | Lệnh | Ghi chú |
 |---|---|---|
-| Hàm | `cd functions`, `npm install`, `npm run build`, `npm test` | 127 kiểm thử |
+| Hàm | `cd functions`, `npm install`, `npm run build`, `npm test` | 187 kiểm thử |
 | Script kho | `cd scripts/kb`, `npm install`, `npm test` | 50 kiểm thử |
-| Trang quản trị | `cd admin`, `npm install`, `npm test` | 45 kiểm thử logic |
-| Quy tắc Firestore và Storage | `cd admin`, `npm run test:rules` | 79 kiểm thử trên emulator, cần Java 21 (Temurin) |
+| Trang quản trị | `cd admin`, `npm install`, `npm test` | 74 kiểm thử logic |
+| Quy tắc Firestore và Storage | `cd admin`, `npm run test:rules` | 98 kiểm thử trên emulator, cần Java 21 (Temurin) |
 
 ## Triển khai
 

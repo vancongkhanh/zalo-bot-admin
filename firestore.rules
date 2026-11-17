@@ -126,12 +126,26 @@ service cloud.firestore {
       allow read: if isAdmin();
     }
 
+    // Bước G: nhật ký mỗi lần quản trị bấm "Hiện thông tin cá nhân". Chỉ thêm, không sửa, không xóa.
+    match /pii_views/{id} {
+      allow read: if isAdmin();
+      allow create: if isAdmin()
+        && request.resource.data.keys().hasOnly(['conversation_id', 'viewed_by', 'viewed_at'])
+        && isStr(request.resource.data.conversation_id, 1, 128)
+        && exists(/databases/$(database)/documents/conversations/$(request.resource.data.conversation_id))
+        && request.resource.data.viewed_by == adminEmail()
+        && request.resource.data.viewed_at == request.time;
+      allow update, delete: if false;
+    }
+
     // ---------- config/main: chỉ sửa các trường của màn Cài đặt ----------
     match /config/{docId} {
       allow get: if isAdmin() && docId == 'main';
       allow update: if isAdmin() && docId == 'main'
         && changed().hasOnly(['ai_enabled', 'confidence_threshold', 'handoff_message', 'reply_enabled',
                               'allowed_chat_ids', 'chat_labels', 'max_images_per_answer',
+                              'image_ai_enabled', 'monthly_image_ai_limit', 'image_quota_message',
+                              'image_summary_enabled', 'image_text_enabled',
                               'updated_at', 'updated_by'])
         && request.resource.data.updated_at == request.time
         && request.resource.data.updated_by == adminEmail()
@@ -150,6 +164,18 @@ service cloud.firestore {
             || (request.resource.data.max_images_per_answer is int
                 && request.resource.data.max_images_per_answer >= 0
                 && request.resource.data.max_images_per_answer <= 10))
+        // Bước F: đọc ảnh người dùng gửi.
+        && (!('image_ai_enabled' in request.resource.data) || request.resource.data.image_ai_enabled is bool)
+        && (!('image_summary_enabled' in request.resource.data)
+            || request.resource.data.image_summary_enabled is bool)
+        // Bước G: chép chữ trên ảnh.
+        && (!('image_text_enabled' in request.resource.data) || request.resource.data.image_text_enabled is bool)
+        && (!('monthly_image_ai_limit' in request.resource.data)
+            || (request.resource.data.monthly_image_ai_limit is int
+                && request.resource.data.monthly_image_ai_limit >= 0
+                && request.resource.data.monthly_image_ai_limit <= 10000))
+        && (!('image_quota_message' in request.resource.data)
+            || isStr(request.resource.data.image_quota_message, 1, 500))
         && (!('chat_labels' in request.resource.data)
             || (request.resource.data.chat_labels is map
                 && request.resource.data.chat_labels.size() <= 50));

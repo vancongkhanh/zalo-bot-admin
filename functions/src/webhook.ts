@@ -8,7 +8,8 @@ import { BotConfig, QUOTA_WARNING_RATIO, dayKey, monthKey } from "./config";
 import { buildAnswerText, clusterKey, KbItem, planImages, sampleText, unansweredId } from "./kb";
 import { stripMention } from "./mention";
 import { SECRET_HEADER, headerValue, safeEqual } from "./security";
-import { AiClient, selectItem, Selection } from "./selector";
+import { FetchedImage, fetchImage } from "./imageFetch";
+import { AiClient, selectItem, selectItemFromImage, Selection } from "./selector";
 import type { ConversationRecord, HandoffReason, Store } from "./store";
 import { MAX_TEXT_LENGTH, ZaloClient } from "./zaloClient";
 
@@ -36,11 +37,15 @@ export interface WebhookDeps {
   getZaloClient: () => ZaloClient;
   /** Tạo client Anthropic khi cần gọi AI (bước C). */
   getAiClient?: () => AiClient;
+  /** Bước F: tải ảnh người dùng gửi (mặc định: fetchImage thật). */
+  fetchImage?: (url: string) => Promise<FetchedImage>;
   logger: Logger;
   now?: () => number;
 }
 
 export const TEXT_EVENT = "message.text.received";
+/** Bước F: tin ảnh (`message_type: CHAT_PHOTO`, có `photo_url`, `caption`; đã kiểm chứng F0). */
+export const IMAGE_EVENT = "message.image.received";
 export const GROUP_CHAT = "GROUP";
 export const REPLY_PREFIX = "Đã nhận: ";
 
@@ -170,8 +175,9 @@ export async function handleWebhook(
         duration_ms: now() - startedAt,
       });
 
-    // 3. Phân loại sự kiện: chỉ tin chữ trong nhóm. Không lưu nội dung các sự kiện này.
-    if (eventName !== TEXT_EVENT) {
+    // 3. Phân loại sự kiện: tin chữ và tin ảnh (bước F) trong nhóm. Không lưu nội dung các sự kiện khác.
+    const isImage = eventName === IMAGE_EVENT;
+    if (eventName !== TEXT_EVENT && !isImage) {
       await writeIgnored(`unsupported_event:${eventName ?? "unknown"}`);
       logger.info("Bỏ qua sự kiện không hỗ trợ", { event_name: eventName, message_id: messageId });
       return OK;
@@ -196,18 +202,47 @@ export async function handleWebhook(
       return OK;
     }
 
-    // 6. Cắt @tên bot.
-    const rawText = typeof msg.text === "string" ? msg.text : "";
+    // 6. Cắt @tên bot (tin ảnh: trong chú thích). Ảnh không gọi tên bot: không tải ảnh, không gọi AI.
+    const rawField = isImage ? msg.caption : msg.text;
+    const rawText = typeof rawField === "string" ? rawField : "";
     const { text: question, hadMention } = stripMention(rawText, config.botMentionName);
+    // Bước G2: link ảnh chỉ lưu khi tin gọi tên bot; không bao giờ ghi vào log.
+    const rawPhotoUrl = isImage ? str(msg.photo_url) : null;
+    const photoUrl = isImage && hadMention ? storablePhotoUrl(rawPhotoUrl) : null;
+    if (isImage && hadMention && rawPhotoUrl && !photoUrl) {
+      logger.warn("Tin ảnh khác mẫu: photo_url không hợp lệ", { message_id: messageId });
+    }
+    const ignoreDone = async (reason: string) => {
+      if (isImage) {
+        await store.writeConversation(messageId as string, {
+          ...baseRecord,
+          question,
+          reply_text: null,
+          outcome: "ignored",
+          ignore_reason: reason,
+          error: null,
+          duration_ms: now() - startedAt,
+          source: "image",
+          ...(hadMention ? { photo_url: photoUrl } : {}),
+        });
+      } else {
+        await writeIgnored(reason, question);
+      }
+      await store.setEventState(messageId as string, "done");
+    };
     if (!hadMention) {
-      await writeIgnored("no_mention", question);
-      await store.setEventState(messageId, "done");
+      await ignoreDone("no_mention");
       return OK;
     }
 
     if (!config.replyEnabled) {
-      await writeIgnored("reply_disabled", question);
-      await store.setEventState(messageId, "done");
+      await ignoreDone("reply_disabled");
+      return OK;
+    }
+
+    // Bước F: đọc ảnh cần bật cả ai_enabled và image_ai_enabled.
+    if (isImage && !(config.aiEnabled && config.imageAiEnabled)) {
+      await ignoreDone("image_ai_disabled");
       return OK;
     }
 
@@ -220,12 +255,17 @@ export async function handleWebhook(
         messages_sent: sent,
         limit: config.monthlyMessageLimit,
       });
-      await writeIgnored("quota", question);
-      await store.setEventState(messageId, "done");
+      await ignoreDone("quota");
       return OK;
     }
 
-    // 8. Bước C: chọn mục bằng AI (khi bật và có câu hỏi).
+    // 8. Bước F: ảnh (chú thích có thể trống). Bước C: chọn mục bằng AI (khi bật và có câu hỏi).
+    if (isImage) {
+      if (!rawPhotoUrl) logger.warn("Tin ảnh khác mẫu: thiếu photo_url", { message_id: messageId });
+      const image = { url: rawPhotoUrl ?? "", storedUrl: photoUrl };
+      await answerWithAi({ deps, config, messageId, chatId, question, month, sent, baseRecord, startedAt, now, image });
+      return OK;
+    }
     if (config.aiEnabled && question) {
       await answerWithAi({ deps, config, messageId, chatId, question, month, sent, baseRecord, startedAt, now });
       return OK;
@@ -290,6 +330,18 @@ export async function handleWebhook(
 
 // ---------- Bước C ----------
 
+export const MAX_PHOTO_URL_CHARS = 2000;
+
+/** Bước G2: chỉ lưu link https hợp lệ, tối đa 2000 ký tự; còn lại null. */
+export function storablePhotoUrl(raw: string | null): string | null {
+  if (!raw || raw.length > MAX_PHOTO_URL_CHARS) return null;
+  try {
+    return new URL(raw).protocol === "https:" ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
 interface AiFlowInput {
   deps: WebhookDeps;
   config: BotConfig;
@@ -301,19 +353,43 @@ interface AiFlowInput {
   baseRecord: Pick<ConversationRecord, "chat_id" | "from_id" | "display_name">;
   startedAt: number;
   now: () => number;
+  /** Bước F: tin ảnh. `url` rỗng khi Zalo không gửi photo_url. */
+  image?: { url: string; storedUrl: string | null };
+}
+
+interface ImageInfo {
+  bytes: number | null;
+  type: string | null;
+  summary: string | null;
+  /** Bước G. Không bao giờ ghi vào log hay gửi Zalo. */
+  text: string | null;
+  fetchMs: number | null;
 }
 
 interface Decision {
   item: KbItem | null;
   reason: HandoffReason | null;
   selection: Selection | null;
+  imageInfo?: ImageInfo;
 }
 
-/** Quyết định trả lời hay chuyển ca (mục 4.2 bước 4-8). */
+/** Quyết định trả lời hay chuyển ca (mục 4.2 bước 4-8; bước F mục 3). */
 async function decide(input: AiFlowInput): Promise<Decision> {
   const { deps, config, question, month } = input;
   const aiCalls = await deps.store.getMonthlyAiCalls(month);
-  if (aiCalls >= config.monthlyAiCallLimit) {
+  if (input.image) {
+    const imageCalls = await deps.store.getMonthlyImageAiCalls(month);
+    if (imageCalls >= config.monthlyImageAiLimit || aiCalls >= config.monthlyAiCallLimit) {
+      deps.logger.warn("Đã hết hạn mức đọc ảnh trong tháng", {
+        month,
+        image_ai_calls: imageCalls,
+        image_limit: config.monthlyImageAiLimit,
+        ai_calls: aiCalls,
+        ai_limit: config.monthlyAiCallLimit,
+      });
+      return { item: null, reason: "image_quota", selection: null };
+    }
+  } else if (aiCalls >= config.monthlyAiCallLimit) {
     deps.logger.warn("Đã hết hạn mức gọi AI trong tháng", { month, ai_calls: aiCalls, limit: config.monthlyAiCallLimit });
     return { item: null, reason: "ai_quota", selection: null };
   }
@@ -322,30 +398,65 @@ async function decide(input: AiFlowInput): Promise<Decision> {
     if (!deps.getAiClient) deps.logger.error("Thiếu client AI");
     return { item: null, reason: items.length === 0 ? "no_match" : "ai_error", selection: null };
   }
-  const selection = await selectItem(question, items, {
-    client: deps.getAiClient(),
-    model: config.aiModel,
-    timeoutMs: config.aiTimeoutMs,
-    now: input.now,
-  });
+  const aiOpts = { client: deps.getAiClient(), model: config.aiModel, timeoutMs: config.aiTimeoutMs, now: input.now };
+
+  let selection: Selection;
+  let imageInfo: ImageInfo | undefined;
+  if (input.image) {
+    // Không ghi link ảnh vào log, chỉ mã lỗi.
+    const fetched = input.image.url
+      ? await (deps.fetchImage ?? ((u: string) => fetchImage(u)))(input.image.url)
+      : ({ ok: false, error: "missing_photo_url", ms: 0 } as const);
+    if (!fetched.ok) {
+      await deps.store.recordImageFetchError(month);
+      deps.logger.error("Lỗi tải ảnh người dùng", { message_id: input.messageId, error: fetched.error, fetch_ms: fetched.ms });
+      return {
+        item: null,
+        reason: "image_fetch_error",
+        selection: null,
+        imageInfo: { bytes: null, type: null, summary: null, text: null, fetchMs: fetched.ms },
+      };
+    }
+    const sel = await selectItemFromImage(question, { data: fetched.data, mediaType: fetched.mediaType }, items, {
+      ...aiOpts,
+      withSummary: config.imageSummaryEnabled,
+      withText: config.imageTextEnabled,
+    });
+    selection = sel;
+    imageInfo = { bytes: fetched.bytes, type: fetched.mediaType, summary: sel.summary, text: sel.imageText, fetchMs: fetched.ms };
+  } else {
+    selection = await selectItem(question, items, aiOpts);
+  }
   await deps.store.recordAiCall(month, {
     ok: selection.ok,
     inputTokens: selection.inputTokens,
     outputTokens: selection.outputTokens,
+    ...(input.image ? { image: true } : {}),
   });
   if (!selection.ok) {
     deps.logger.error("Lỗi gọi AI", { message_id: input.messageId, error: selection.error, ai_ms: selection.ms });
-    return { item: null, reason: "ai_error", selection };
+    return { item: null, reason: "ai_error", selection, imageInfo };
   }
-  if (!selection.slug) return { item: null, reason: "no_match", selection };
-  if (selection.confidence < config.confidenceThreshold) return { item: null, reason: "low_confidence", selection };
-  return { item: items.find((i) => i.slug === selection.slug) ?? null, reason: null, selection };
+  if (!selection.slug) return { item: null, reason: "no_match", selection, imageInfo };
+  if (selection.confidence < config.confidenceThreshold) {
+    return { item: null, reason: "low_confidence", selection, imageInfo };
+  }
+  const slug = selection.slug;
+  return { item: items.find((i) => i.slug === slug) ?? null, reason: null, selection, imageInfo };
+}
+
+/** Bước F: bản ghi `unanswered` cho tin ảnh. Có chú thích: gộp như câu chữ; không có: mỗi tin một bản ghi. */
+function unansweredKey(question: string, messageId: string, isImage: boolean): { id: string; key: string } {
+  const key = clusterKey(question);
+  if (isImage && !key) return { id: `img_${messageId}`, key: "" };
+  return { id: unansweredId(key), key };
 }
 
 async function answerWithAi(input: AiFlowInput): Promise<void> {
   const { deps, config, messageId, chatId, question, month, sent, now } = input;
   const { store, logger } = deps;
-  const { item, reason, selection } = await decide(input);
+  const isImage = !!input.image;
+  const { item, reason, selection, imageInfo } = await decide(input);
   const okSel = selection?.ok ? selection : null;
 
   // Bước E: ảnh của mục (chỉ mục approved, AI không chọn ảnh).
@@ -375,7 +486,7 @@ async function answerWithAi(input: AiFlowInput): Promise<void> {
       });
     }
   } else {
-    replyText = config.handoffMessage;
+    replyText = reason === "image_quota" ? config.imageQuotaMessage : config.handoffMessage;
   }
 
   const zalo = deps.getZaloClient();
@@ -416,17 +527,20 @@ async function answerWithAi(input: AiFlowInput): Promise<void> {
     aiError: reason === "ai_error",
     slug: item && result.ok ? item.slug : null,
     ...(imagesSent > 0 ? { photosSent: imagesSent } : {}),
+    ...(isImage ? { image: true } : {}),
   });
   if (item && result.ok) await store.recordHit(item.slug);
   if (!item && reason) {
-    const key = clusterKey(question);
+    const { id, key } = unansweredKey(question, messageId, isImage);
+    const summary = imageInfo?.summary ?? null;
     await store.recordUnanswered({
-      id: unansweredId(key),
+      id,
       clusterKey: key,
-      sample: sampleText(question),
+      sample: isImage ? sampleText(`[Ảnh] ${question || summary || "(không có chú thích)"}`) : sampleText(question),
       reason,
       bestGuessSlug: okSel?.slug ?? null,
       bestGuessConfidence: okSel?.slug ? okSel.confidence : null,
+      ...(isImage ? { source: "image" as const, imageSummary: summary } : {}),
     });
   }
 
@@ -446,6 +560,17 @@ async function answerWithAi(input: AiFlowInput): Promise<void> {
     ...(images.length > 0
       ? { images_sent: imagesSent, image_errors: imageErrors, images_as_links: imagesAsLinks }
       : {}),
+    ...(isImage
+      ? {
+          source: "image" as const,
+          image_bytes: imageInfo?.bytes ?? null,
+          image_type: imageInfo?.type ?? null,
+          image_summary: imageInfo?.summary ?? null,
+          image_text: imageInfo?.text ?? null,
+          fetch_ms: imageInfo?.fetchMs ?? null,
+          photo_url: input.image?.storedUrl ?? null,
+        }
+      : {}),
   };
   await store.writeConversation(messageId, record);
   await store.setEventState(messageId, result.ok ? "done" : "failed");
@@ -460,6 +585,7 @@ async function answerWithAi(input: AiFlowInput): Promise<void> {
     images_sent: record.images_sent,
     image_errors: record.image_errors,
     images_as_links: record.images_as_links,
+    ...(isImage ? { source: "image", image_bytes: record.image_bytes, fetch_ms: record.fetch_ms } : {}),
     duration_ms: record.duration_ms,
   });
 }

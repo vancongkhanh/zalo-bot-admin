@@ -168,12 +168,14 @@ Trang quản trị (màn Cài đặt) được sửa trường này.
 
 | # | Kết quả |
 |---|---|
-| E1, E2, E3, E4, E5 | Đạt trên kiểm thử đơn vị (Zalo giả). **Chưa thử thật** |
+| E1 | **Đạt khi chạy thật** 16/11/2026: bạn xác nhận ảnh hiện đúng trên điện thoại (ảnh từ Firebase Storage) |
+| E3 | **Đạt khi chạy thật:** 2 lần trả lời gửi 2 và 3 ảnh, `photos_sent` = 5, `photo_errors` = 0, khớp `conversations` |
+| E2, E4, E5 | Đạt trên kiểm thử đơn vị (Zalo giả). Chưa thử thật |
 | E6 | Đạt trên emulator |
 | E7 | Đạt trên kiểm thử script (Firestore giả). Chưa thử với kho thật |
 | E8 | Trên emulator: ảnh 3000×2000 thành 1600×1067. Chưa thử với ảnh chụp màn hình 5 MB thật |
 | E9 | Đạt trên kiểm thử logic và emulator: đổi thứ tự ở mục đã duyệt hiện ô xác nhận, `version` 1 → 2 |
-| E10 | Chưa đo (cần chạy thật) |
+| E10 | Đo lần đầu: `duration_ms` 10.007 (2 ảnh) và 11.627 (3 ảnh), `ai_ms` khoảng 2 giây, nên mỗi `sendPhoto` mất khoảng **3 giây**, chậm hơn ước tính 0,5-1 giây ở mục 3. Vẫn xa giới hạn 60 giây; nhật ký chưa thấy Zalo gửi lại yêu cầu. Cần theo dõi thêm vài ngày, nhất là với 4 ảnh (ước khoảng 15 giây) |
 
 ### 9.3 Khác với spec
 
@@ -187,4 +189,5 @@ Trang quản trị (màn Cài đặt) được sửa trường này.
 
 1. ~~Bật Storage~~: bạn đã bật. Tên bucket khớp `storageBucket` trong `admin/index.html`.
 2. ~~Triển khai~~: xong 16/11/2026 (`storage`, `firestore`, `functions`). Còn tải `admin/index.html` lên kho `zalo-bot-admin`.
-3. Thử E1-E5, E7-E10 thật. Đặc biệt xác nhận Zalo nhận được link tải của Firebase Storage (mới thử ảnh trên GitHub Pages).
+3. ~~Bật quyền cho Storage đọc Firestore~~: cấp qua `firebase deploy --only storage` (trả lời Yes). Lần triển khai đầu chạy không hỏi nên thiếu quyền, tải ảnh bị từ chối.
+4. Thử nốt E2, E4, E5, E7-E10 thật. Kiểm tra nhanh: `node scripts/kb/check-images.mjs` (chỉ đọc). Đặc biệt xác nhận Zalo nhận được link tải của Firebase Storage (mới thử ảnh trên GitHub Pages).

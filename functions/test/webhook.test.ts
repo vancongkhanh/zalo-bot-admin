@@ -4,7 +4,8 @@ import { BotConfig, DEFAULT_CONFIG } from "../src/config";
 import type { KbItem } from "../src/kb";
 import type { AiClient } from "../src/selector";
 import type { AiCallRecord, ConversationRecord, DailyStat, Store, UnansweredInput } from "../src/store";
-import { handleWebhook, Logger, redactBody, WebhookDeps } from "../src/webhook";
+import type { FetchedImage } from "../src/imageFetch";
+import { handleWebhook, Logger, MAX_PHOTO_URL_CHARS, redactBody, storablePhotoUrl, WebhookDeps } from "../src/webhook";
 import type { ZaloClient, ZaloResult } from "../src/zaloClient";
 
 // Giá trị giả, chỉ dùng trong kiểm thử.
@@ -84,6 +85,15 @@ class FakeStore implements Store {
     this.calls.push("recordAiCall");
     this.aiCalls++;
     this.aiRecords.push(call);
+  }
+  imageAiCalls = 0;
+  imageFetchErrors = 0;
+  async getMonthlyImageAiCalls() {
+    return this.imageAiCalls;
+  }
+  async recordImageFetchError() {
+    this.calls.push("recordImageFetchError");
+    this.imageFetchErrors++;
   }
   async recordDailyStat(day: string, stat: DailyStat) {
     this.daily.push({ day, stat });
@@ -242,14 +252,14 @@ describe("chống trùng", () => {
 });
 
 describe("quyết định bỏ qua", () => {
-  it("sự kiện ảnh → ignored, không gửi, không lưu nội dung", async () => {
-    const ev = textEvent({ event: "message.image.received" });
+  it("sự kiện không hỗ trợ (sticker) → ignored, không gửi, không lưu nội dung", async () => {
+    const ev = textEvent({ event: "message.sticker.received" });
     const r = await handleWebhook(post(ev), deps);
     expect(r.status).toBe(200);
     expect(zalo.sendMessage).not.toHaveBeenCalled();
     expect(store.conversations.get("FAKEMSG00000000000001")).toMatchObject({
       outcome: "ignored",
-      ignore_reason: "unsupported_event:message.image.received",
+      ignore_reason: "unsupported_event:message.sticker.received",
       question: null,
     });
   });
@@ -670,5 +680,339 @@ describe("bước E: gửi ảnh kèm câu trả lời", () => {
     await ask("@Bot TTHC Đảng ký số");
     await ask("@Bot TTHC Đảng ký số");
     expect(zalo.sendPhoto).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---------- Bước F: đọc ảnh người dùng gửi ----------
+
+const PHOTO_URL = "https://photo-zalo.example/fake/abc.jpg";
+
+function imageEvent(o: Partial<{ id: string; caption: string | undefined; photoUrl: string | undefined }> = {}) {
+  const message: Record<string, unknown> = {
+    message_id: o.id ?? "FAKEIMG00000000000001",
+    date: 1794878325918,
+    message_type: "CHAT_PHOTO",
+    from: { id: "FAKEUSER0000000000001", display_name: "Ten Nguoi Dung", is_bot: false },
+    chat: { id: GROUP, chat_type: "GROUP" },
+  };
+  if (!("caption" in o) || o.caption !== undefined) message.caption = o.caption ?? "@Bot TTHC Đảng lỗi này là sao";
+  if (!("photoUrl" in o) || o.photoUrl !== undefined) message.photo_url = o.photoUrl ?? PHOTO_URL;
+  return { event_name: "message.image.received", message };
+}
+
+const okImage: FetchedImage = { ok: true, data: "AAAA", mediaType: "image/png", bytes: 3, ms: 40 };
+
+function setupImageAi(
+  out = '{"slug":"ky-so","confidence":0.92,"mo_ta":"Màn hình ký số báo lỗi"}',
+  cfg: Partial<BotConfig> = {},
+  fetched: FetchedImage = okImage,
+) {
+  const create = setupAi(async () => aiReply(out), { imageAiEnabled: true, ...cfg });
+  const fetchFn = vi.fn(async (_url: string) => fetched);
+  deps.fetchImage = fetchFn;
+  return { create, fetchFn };
+}
+
+const sendImage = (o: Parameters<typeof imageEvent>[0] = {}) => handleWebhook(post(imageEvent(o)), deps);
+
+describe("bước F: đọc ảnh người dùng gửi", () => {
+  it("ảnh không gọi tên bot → ignored no_mention, không tải ảnh, không gọi AI (F1)", async () => {
+    const { create, fetchFn } = setupImageAi();
+    await sendImage({ caption: "ảnh đi chơi" });
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(zalo.sendMessage).not.toHaveBeenCalled();
+    expect(store.conversations.get("FAKEIMG00000000000001")).toMatchObject({
+      outcome: "ignored",
+      ignore_reason: "no_mention",
+      source: "image",
+    });
+  });
+
+  it("ảnh không có chú thích → no_mention", async () => {
+    const { fetchFn } = setupImageAi();
+    await sendImage({ caption: undefined });
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(store.conversations.get("FAKEIMG00000000000001")?.ignore_reason).toBe("no_mention");
+  });
+
+  it("image_ai_enabled = false (mặc định) → ignored image_ai_disabled, không tải ảnh (F7)", async () => {
+    const { create, fetchFn } = setupImageAi(undefined, { imageAiEnabled: false });
+    await sendImage();
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(zalo.sendMessage).not.toHaveBeenCalled();
+    expect(store.conversations.get("FAKEIMG00000000000001")?.ignore_reason).toBe("image_ai_disabled");
+    expect(DEFAULT_CONFIG.imageAiEnabled).toBe(false);
+  });
+
+  it("ai_enabled = false → cũng không đọc ảnh", async () => {
+    const { fetchFn } = setupImageAi(undefined, { aiEnabled: false });
+    await sendImage();
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(store.conversations.get("FAKEIMG00000000000001")?.ignore_reason).toBe("image_ai_disabled");
+  });
+
+  it("ảnh có trong kho → gửi nguyên văn answer; AI nhận ảnh base64 và chú thích; bộ đếm ảnh (F2)", async () => {
+    const { create, fetchFn } = setupImageAi();
+    await sendImage();
+    expect(fetchFn).toHaveBeenCalledWith(PHOTO_URL);
+    expect(zalo.sendMessage).toHaveBeenCalledWith(GROUP, "Vào mục Ký số, chọn chứng thư.\n\nVideo: https://youtu.be/fake");
+    const req = create.mock.calls[0][0] as Anthropic.MessageCreateParamsNonStreaming;
+    const content = req.messages[0].content as Anthropic.ContentBlockParam[];
+    expect(content[0]).toEqual({ type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } });
+    expect((content[1] as Anthropic.TextBlockParam).text).toContain("<cau_hoi>\nlỗi này là sao\n</cau_hoi>");
+    expect(JSON.stringify(req.output_config)).toContain("mo_ta");
+    expect(store.aiRecords).toEqual([{ ok: true, inputTokens: 300, outputTokens: 15, image: true }]);
+    expect(store.daily[0].stat).toMatchObject({ outcome: "answered", slug: "ky-so", image: true });
+    expect(store.hits).toEqual(["ky-so"]);
+    expect(store.conversations.get("FAKEIMG00000000000001")).toMatchObject({
+      outcome: "answered",
+      matched_slug: "ky-so",
+      question: "lỗi này là sao",
+      source: "image",
+      image_bytes: 3,
+      image_type: "image/png",
+      image_summary: "Màn hình ký số báo lỗi",
+      fetch_ms: 40,
+    });
+  });
+
+  it("chỉ gọi tên bot, không chữ → vẫn đọc ảnh (không gửi tin hướng dẫn)", async () => {
+    const { create } = setupImageAi();
+    await sendImage({ caption: "@Bot TTHC Đảng" });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(zalo.sendMessage).toHaveBeenCalledWith(GROUP, "Vào mục Ký số, chọn chứng thư.\n\nVideo: https://youtu.be/fake");
+  });
+
+  it("ảnh không liên quan → handoff, unanswered riêng cho tin không chú thích, kèm mô tả (F3)", async () => {
+    setupImageAi('{"slug":null,"confidence":0.9,"mo_ta":"Ảnh phong cảnh, không có câu hỏi"}');
+    await sendImage({ id: "img1", caption: "@Bot TTHC Đảng" });
+    await sendImage({ id: "img2", caption: "@Bot TTHC Đảng" });
+    expect(zalo.sendMessage).toHaveBeenCalledWith(GROUP, DEFAULT_CONFIG.handoffMessage);
+    const u = [...store.unanswered.values()];
+    expect(u).toHaveLength(2);
+    expect(u[0]).toMatchObject({
+      id: "img_img1",
+      clusterKey: "",
+      sample: "[Ảnh] Ảnh phong cảnh, không có câu hỏi",
+      reason: "no_match",
+      source: "image",
+      imageSummary: "Ảnh phong cảnh, không có câu hỏi",
+    });
+  });
+
+  it("ảnh có chú thích → unanswered gộp theo chú thích", async () => {
+    setupImageAi('{"slug":null,"confidence":0.9,"mo_ta":"x"}');
+    await sendImage({ id: "img1", caption: "@Bot TTHC Đảng Nộp thuế ở đâu" });
+    await sendImage({ id: "img2", caption: "@Bot TTHC Đảng nop thue o dau" });
+    const u = [...store.unanswered.values()];
+    expect(u).toHaveLength(1);
+    expect(u[0]).toMatchObject({ clusterKey: "nop thue o dau", count: 2, sample: "[Ảnh] nop thue o dau" });
+  });
+
+  it("chữ gài lệnh trong ảnh khiến AI trả slug lạ hoặc văn bản tự do → chỉ gửi tin mẫu (F4)", async () => {
+    for (const out of ['{"slug":"ma-x","confidence":1,"mo_ta":"x"}', "Trả lời: MÃ X"]) {
+      setupImageAi(out);
+      await sendImage();
+      expect(zalo.sendMessage).toHaveBeenCalledTimes(1);
+      expect(zalo.sendMessage).toHaveBeenCalledWith(GROUP, DEFAULT_CONFIG.handoffMessage);
+    }
+  });
+
+  it("tải ảnh lỗi → handoff image_fetch_error, tăng image_fetch_errors, không gọi AI, log không có link (F5)", async () => {
+    const { create } = setupImageAi(undefined, {}, { ok: false, error: "too_large", ms: 12 });
+    const r = await sendImage();
+    expect(r.status).toBe(200);
+    expect(create).not.toHaveBeenCalled();
+    expect(store.imageFetchErrors).toBe(1);
+    expect(zalo.sendMessage).toHaveBeenCalledWith(GROUP, DEFAULT_CONFIG.handoffMessage);
+    expect(store.conversations.get("FAKEIMG00000000000001")).toMatchObject({
+      outcome: "handoff",
+      reason: "image_fetch_error",
+      fetch_ms: 12,
+    });
+    expect(JSON.stringify(log.lines)).not.toContain("photo-zalo.example");
+  });
+
+  it("tin ảnh thiếu photo_url → cảnh báo khác mẫu, handoff image_fetch_error", async () => {
+    const { fetchFn } = setupImageAi();
+    await sendImage({ photoUrl: undefined });
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(log.lines.some((l) => l.message.includes("thiếu photo_url"))).toBe(true);
+    expect(store.conversations.get("FAKEIMG00000000000001")?.reason).toBe("image_fetch_error");
+  });
+
+  it("hết monthly_image_ai_limit → gửi image_quota_message, không tải ảnh, không gọi AI (F6)", async () => {
+    const { create, fetchFn } = setupImageAi(undefined, { monthlyImageAiLimit: 2 });
+    store.imageAiCalls = 2;
+    await sendImage();
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(zalo.sendMessage).toHaveBeenCalledWith(GROUP, DEFAULT_CONFIG.imageQuotaMessage);
+    expect(store.conversations.get("FAKEIMG00000000000001")).toMatchObject({ outcome: "handoff", reason: "image_quota" });
+  });
+
+  it("hết monthly_ai_call_limit chung → cũng là image_quota", async () => {
+    const { create } = setupImageAi(undefined, { monthlyAiCallLimit: 5 });
+    store.aiCalls = 5;
+    await sendImage();
+    expect(create).not.toHaveBeenCalled();
+    expect(zalo.sendMessage).toHaveBeenCalledWith(GROUP, DEFAULT_CONFIG.imageQuotaMessage);
+  });
+
+  it("image_summary_enabled = false → không yêu cầu mo_ta, không lưu mô tả", async () => {
+    const { create } = setupImageAi('{"slug":"ky-so","confidence":0.92}', { imageSummaryEnabled: false });
+    await sendImage();
+    const req = create.mock.calls[0][0] as Anthropic.MessageCreateParamsNonStreaming;
+    expect(JSON.stringify(req.output_config)).not.toContain("mo_ta");
+    expect(store.conversations.get("FAKEIMG00000000000001")?.image_summary).toBeNull();
+  });
+
+  it("không lưu dữ liệu ảnh; photo_url chỉ ở conversations, không ở log, unanswered, thống kê (F8, G2.3)", async () => {
+    setupImageAi('{"slug":null,"confidence":0.9,"mo_ta":"x"}', { logRawBody: true });
+    await sendImage();
+    const others = JSON.stringify([[...store.unanswered.values()], store.daily]);
+    const logs = JSON.stringify(log.lines);
+    for (const s of [others, logs]) {
+      expect(s).not.toContain("photo-zalo.example");
+      expect(s).not.toContain("AAAA");
+    }
+    expect(JSON.stringify([...store.conversations.values()])).not.toContain("AAAA");
+    expect(store.conversations.get("FAKEIMG00000000000001")?.photo_url).toBe(PHOTO_URL);
+    expect(JSON.stringify(zalo.sendMessage.mock.calls)).not.toContain("photo-zalo.example");
+  });
+
+  it("chống trùng: Zalo gửi lại cùng tin ảnh → chỉ tải và trả lời một lần", async () => {
+    const { fetchFn } = setupImageAi();
+    await sendImage();
+    await sendImage();
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(zalo.sendMessage).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("bước G: chữ đọc được trên ảnh", () => {
+  const OUT = JSON.stringify({
+    slug: "ky-so",
+    confidence: 0.92,
+    mo_ta: "Màn hình ký số báo lỗi",
+    noi_dung_anh: "Ký số\nHồ sơ ⟦H12.34-0001⟧ của ⟦Nguyễn Văn A⟧\nLỗi: mã ZXQ-77",
+  });
+
+  it("mặc định yêu cầu noi_dung_anh, lưu image_text, không gửi Zalo, không ghi log (G8)", async () => {
+    const { create } = setupImageAi(OUT);
+    await sendImage();
+    const req = create.mock.calls[0][0] as Anthropic.MessageCreateParamsNonStreaming;
+    expect(JSON.stringify(req.output_config)).toContain("noi_dung_anh");
+    expect(req.max_tokens).toBe(2048);
+    const rec = store.conversations.get("FAKEIMG00000000000001");
+    expect(rec?.image_text).toBe("Ký số\nHồ sơ ⟦H12.34-0001⟧ của ⟦Nguyễn Văn A⟧\nLỗi: mã ZXQ-77");
+    expect(rec?.outcome).toBe("answered");
+    const sent = JSON.stringify(zalo.sendMessage.mock.calls);
+    expect(sent).not.toContain("Nguyễn Văn A");
+    expect(sent).not.toContain("ZXQ-77");
+    expect(JSON.stringify(log.lines)).not.toContain("Nguyễn Văn A");
+    expect(JSON.stringify([...store.unanswered.values()])).not.toContain("Nguyễn Văn A");
+  });
+
+  it("image_text_enabled = false → không yêu cầu noi_dung_anh, image_text null", async () => {
+    const { create } = setupImageAi(OUT, { imageTextEnabled: false });
+    await sendImage();
+    const req = create.mock.calls[0][0] as Anthropic.MessageCreateParamsNonStreaming;
+    expect(JSON.stringify(req)).not.toContain("noi_dung_anh");
+    expect(req.max_tokens).toBe(1024);
+    expect(store.conversations.get("FAKEIMG00000000000001")?.image_text).toBeNull();
+  });
+
+  it("noi_dung_anh sai kiểu → bỏ trường, vẫn trả lời bình thường", async () => {
+    setupImageAi('{"slug":"ky-so","confidence":0.92,"mo_ta":"x","noi_dung_anh":5}');
+    await sendImage();
+    const rec = store.conversations.get("FAKEIMG00000000000001");
+    expect(rec).toMatchObject({ outcome: "answered", image_text: null });
+  });
+
+  it("lỗi tải ảnh → image_text null", async () => {
+    setupImageAi(OUT, {}, { ok: false, error: "timeout", ms: 10000 });
+    await sendImage();
+    expect(store.conversations.get("FAKEIMG00000000000001")).toMatchObject({
+      reason: "image_fetch_error",
+      image_text: null,
+    });
+  });
+
+  it("tin chữ không có image_text", async () => {
+    setupAi(async () => aiReply('{"slug":"ky-so","confidence":0.92}'));
+    await handleWebhook(post(textEvent({ text: "@Bot TTHC Đảng cài ký số" })), deps);
+    const rec = [...store.conversations.values()][0];
+    expect(rec).not.toHaveProperty("image_text");
+  });
+});
+
+describe("bước G2: lưu photo_url để xem lại", () => {
+  const rec = () => store.conversations.get("FAKEIMG00000000000001");
+
+  it("ảnh gọi tên bot, trả lời được → có photo_url (G2.1)", async () => {
+    setupImageAi();
+    await sendImage();
+    expect(rec()).toMatchObject({ outcome: "answered", photo_url: PHOTO_URL });
+  });
+
+  it("chuyển ca, lỗi tải ảnh, hết hạn mức đọc ảnh → vẫn có photo_url", async () => {
+    setupImageAi('{"slug":null,"confidence":0.9,"mo_ta":"x"}');
+    await sendImage();
+    expect(rec()).toMatchObject({ outcome: "handoff", photo_url: PHOTO_URL });
+
+    setupImageAi(undefined, {}, { ok: false, error: "timeout", ms: 10000 });
+    await sendImage();
+    expect(rec()).toMatchObject({ reason: "image_fetch_error", photo_url: PHOTO_URL });
+
+    setupImageAi(undefined, { monthlyImageAiLimit: 0 });
+    await sendImage();
+    expect(rec()).toMatchObject({ reason: "image_quota", photo_url: PHOTO_URL });
+  });
+
+  it("chưa bật đọc ảnh hoặc tắt trả lời → ignored nhưng có photo_url", async () => {
+    setupImageAi(undefined, { imageAiEnabled: false });
+    await sendImage();
+    expect(rec()).toMatchObject({ outcome: "ignored", ignore_reason: "image_ai_disabled", photo_url: PHOTO_URL });
+
+    setupImageAi(undefined, { replyEnabled: false });
+    await sendImage();
+    expect(rec()).toMatchObject({ ignore_reason: "reply_disabled", photo_url: PHOTO_URL });
+  });
+
+  it("ảnh không gọi tên bot → không có photo_url (G2.1)", async () => {
+    setupImageAi();
+    await sendImage({ caption: "ảnh đi chơi" });
+    expect(rec()?.ignore_reason).toBe("no_mention");
+    expect(rec()).not.toHaveProperty("photo_url");
+    expect(JSON.stringify([...store.conversations.values()])).not.toContain("photo-zalo.example");
+  });
+
+  it("link không phải https hoặc quá dài → null, log không kèm link (G2.2)", async () => {
+    setupImageAi();
+    await sendImage({ photoUrl: "http://photo-zalo.example/a.jpg" });
+    expect(rec()?.photo_url).toBeNull();
+    expect(log.lines.some((l) => l.message.includes("photo_url không hợp lệ"))).toBe(true);
+    expect(JSON.stringify(log.lines)).not.toContain("photo-zalo.example");
+
+    setupImageAi();
+    await sendImage({ photoUrl: "https://photo-zalo.example/" + "a".repeat(2000) });
+    expect(rec()?.photo_url).toBeNull();
+  });
+
+  it("storablePhotoUrl", () => {
+    expect(storablePhotoUrl("https://x.example/a.jpg")).toBe("https://x.example/a.jpg");
+    expect(storablePhotoUrl("javascript:alert(1)")).toBeNull();
+    expect(storablePhotoUrl("không phải link")).toBeNull();
+    expect(storablePhotoUrl(null)).toBeNull();
+    expect(storablePhotoUrl("https://x.example/" + "a".repeat(MAX_PHOTO_URL_CHARS))).toBeNull();
+  });
+
+  it("tin chữ không có photo_url", async () => {
+    setupAi(async () => aiReply('{"slug":"ky-so","confidence":0.92}'));
+    await ask("@Bot TTHC Đảng cài ký số");
+    expect([...store.conversations.values()][0]).not.toHaveProperty("photo_url");
   });
 });

@@ -5,7 +5,7 @@ const {
   validateItemForm, buildItemWrite, needsLiveConfirm, mergeQuestions, suggestSlug, itemToForm,
   settingsFromConfig, validateSettings, summarizeStats, lastNDays, monthKey, filterItems, estimateCost,
   parseLinks, approveProblems, BOT_DEFAULTS, validateImages, scaleSize, imageFileProblem, imageSendNote,
-  diffContent,
+  diffContent, addQuestionsText, suggestPayload, stripImageTag, REASON_LABELS,
 } = logic;
 
 const form = (over = {}) => ({
@@ -168,6 +168,11 @@ describe("Cài đặt", () => {
       confidence_threshold: "0.7",
       handoff_message: BOT_DEFAULTS.handoff_message,
       max_images_per_answer: "4",
+      image_ai_enabled: false,
+      image_summary_enabled: true,
+      image_text_enabled: true,
+      monthly_image_ai_limit: "300",
+      image_quota_message: BOT_DEFAULTS.image_quota_message,
       chats: [],
     });
   });
@@ -185,8 +190,32 @@ describe("Cài đặt", () => {
     expect(errors).toEqual([]);
     expect(data).toEqual({
       ai_enabled: true, reply_enabled: true, confidence_threshold: 0.8, handoff_message: "Chờ nhé",
-      max_images_per_answer: 4, allowed_chat_ids: ["g1", "g2"], chat_labels: { g1: "Nhóm 1" },
+      max_images_per_answer: 4, image_ai_enabled: false, image_summary_enabled: true, image_text_enabled: true,
+      monthly_image_ai_limit: 300,
+      image_quota_message: BOT_DEFAULTS.image_quota_message,
+      allowed_chat_ids: ["g1", "g2"], chat_labels: { g1: "Nhóm 1" },
     });
+  });
+
+  it("bước F: đọc và ghi bốn trường đọc ảnh", () => {
+    const f = settingsFromConfig({
+      image_ai_enabled: true, image_summary_enabled: false, monthly_image_ai_limit: 50, image_quota_message: "Gõ chữ nhé",
+    });
+    expect(f).toMatchObject({
+      image_ai_enabled: true, image_summary_enabled: false, monthly_image_ai_limit: "50", image_quota_message: "Gõ chữ nhé",
+    });
+    expect(settingsFromConfig({ monthly_image_ai_limit: 20000 }).monthly_image_ai_limit).toBe("300");
+    const { data } = validateSettings({ ...f, confidence_threshold: "0.7", handoff_message: "ok", chats: [] });
+    expect(data).toMatchObject({
+      image_ai_enabled: true, image_summary_enabled: false, monthly_image_ai_limit: 50, image_quota_message: "Gõ chữ nhé",
+    });
+  });
+
+  it("bước F: bỏ tiền tố [Ảnh] khi dùng mẫu làm cách hỏi", () => {
+    expect(stripImageTag("[Ảnh] lỗi ký số")).toBe("lỗi ký số");
+    expect(stripImageTag("lỗi ký số")).toBe("lỗi ký số");
+    expect(REASON_LABELS.image_quota).toBeTruthy();
+    expect(REASON_LABELS.image_fetch_error).toBeTruthy();
   });
 
   it.each([
@@ -201,6 +230,10 @@ describe("Cài đặt", () => {
     [{ max_images_per_answer: "-1" }, "Số ảnh"],
     [{ max_images_per_answer: "2.5" }, "Số ảnh"],
     [{ max_images_per_answer: "" }, "Số ảnh"],
+    [{ monthly_image_ai_limit: "10001" }, "Hạn mức đọc ảnh"],
+    [{ monthly_image_ai_limit: "1.5" }, "Hạn mức đọc ảnh"],
+    [{ image_quota_message: " " }, "hết hạn mức đọc ảnh trống"],
+    [{ image_quota_message: "x".repeat(501) }, "500"],
   ])("lỗi: %o", (over, text) => {
     const base = { ai_enabled: false, reply_enabled: true, confidence_threshold: "0.7", handoff_message: "ok", chats: [] };
     const { data, errors } = validateSettings({ ...base, ...over });
@@ -221,12 +254,12 @@ describe("Thống kê", () => {
     const s = summarizeStats(
       [
         { id: "2026-11-15", data: { questions: 4, answered: 3, handoff: 1, item_hits: { a: 2, b: 1 } } },
-        { id: "2026-11-17", data: { questions: 2, answered: 1, handoff: 1, ai_errors: 1, item_hits: { b: 2 } } },
+        { id: "2026-11-17", data: { questions: 2, answered: 1, handoff: 1, ai_errors: 1, image_questions: 1, item_hits: { b: 2 } } },
       ],
       ["2026-11-15", "2026-11-16", "2026-11-17"],
     );
-    expect(s.totals).toEqual({ questions: 6, answered: 4, handoff: 2, ai_errors: 1 });
-    expect(s.rows[1]).toEqual({ day: "2026-11-16", questions: 0, answered: 0, handoff: 0, ai_errors: 0 });
+    expect(s.totals).toEqual({ questions: 6, answered: 4, handoff: 2, ai_errors: 1, image_questions: 1 });
+    expect(s.rows[1]).toEqual({ day: "2026-11-16", questions: 0, answered: 0, handoff: 0, ai_errors: 0, image_questions: 0 });
     expect(s.topItems).toEqual([{ slug: "b", count: 3 }, { slug: "a", count: 2 }]);
     expect(s.autoRate).toBeCloseTo(4 / 6);
     expect(summarizeStats([], ["2026-11-15"]).autoRate).toBeNull();
@@ -301,5 +334,211 @@ describe("Ảnh (bước E)", () => {
   it("Cài đặt đọc max_images_per_answer; giá trị sai dùng mặc định", () => {
     expect(settingsFromConfig({ max_images_per_answer: 0 }).max_images_per_answer).toBe("0");
     expect(settingsFromConfig({ max_images_per_answer: 12 }).max_images_per_answer).toBe("4");
+  });
+});
+
+
+describe("AI đề xuất cách hỏi (trang)", () => {
+  it("addQuestionsText thêm câu mới, bỏ câu trùng kể cả khác dấu", () => {
+    expect(addQuestionsText("ký số thế nào\n\ncài chữ ký số", ["ky so the nao", "  ký số bị lỗi ", ""]))
+      .toBe("ký số thế nào\ncài chữ ký số\nký số bị lỗi");
+    expect(addQuestionsText("", ["a"])).toBe("a");
+  });
+  it("suggestPayload lấy tiêu đề, nhóm, trả lời, các cách hỏi đã có", () => {
+    expect(suggestPayload(form({ title: " Ký   số ", questions: "a\na\nb" }))).toEqual({
+      title: "Ký số", topic: "Chữ ký", answer: "Vào mục Ký số.", questions: ["a", "b"],
+    });
+  });
+});
+
+describe("bước G: lịch sử hỗ trợ", () => {
+  const {
+    historyClauses, historySince, isHistoryRecord, historyStatus, historySummary, filterHistory, splitPii, maskPii,
+    hasPii, formatBytes, SILENT_REASONS,
+  } = logic;
+
+  it("Tất cả = các kết quả có gọi tên bot, cộng tin bot không trả lời; không có no_mention", () => {
+    const all = historyClauses("all");
+    expect(all).toEqual([["outcome", ["answered", "replied", "handoff", "error"]], ["ignore_reason", SILENT_REASONS]]);
+    expect(JSON.stringify(all)).not.toContain("no_mention");
+    expect(historyClauses("answered")).toEqual([["outcome", ["answered", "replied"]]]);
+    expect(historyClauses("error")).toEqual([["outcome", ["error"]], ["send_ok", [false]]]);
+  });
+
+  it("chỉ nhận tin gọi tên bot", () => {
+    expect(isHistoryRecord({ outcome: "answered" })).toBe(true);
+    expect(isHistoryRecord({ outcome: "ignored", ignore_reason: "image_ai_disabled" })).toBe(true);
+    expect(isHistoryRecord({ outcome: "ignored", ignore_reason: "no_mention" })).toBe(false);
+    expect(isHistoryRecord({ outcome: "ignored", ignore_reason: "not_group:PRIVATE" })).toBe(false);
+    expect(isHistoryRecord(null)).toBe(false);
+  });
+
+  it("mốc thời gian theo 0 giờ Việt Nam", () => {
+    const now = new Date("2026-11-17T20:00:00Z"); // 03:00 ngày 18/11 giờ Việt Nam
+    expect(historySince("today", now).toISOString()).toBe("2026-11-17T17:00:00.000Z");
+    expect(historySince("7", now).toISOString()).toBe("2026-11-11T17:00:00.000Z");
+    expect(historySince("90", now).toISOString()).toBe("2026-08-20T17:00:00.000Z");
+  });
+
+  it("nhãn kết quả và tóm tắt; gửi lỗi tính là lỗi", () => {
+    expect(historyStatus({ outcome: "answered" }).key).toBe("answered");
+    expect(historyStatus({ outcome: "replied" }).key).toBe("answered");
+    expect(historyStatus({ outcome: "handoff" }).key).toBe("handoff");
+    expect(historyStatus({ outcome: "answered", send_ok: false }).key).toBe("error");
+    expect(historyStatus({ outcome: "ignored", ignore_reason: "quota" }).key).toBe("silent");
+    expect(historySummary([
+      { outcome: "answered", source: "image" }, { outcome: "handoff" }, { outcome: "error" },
+      { outcome: "ignored", ignore_reason: "quota" },
+    ])).toEqual({ total: 4, answered: 1, handoff: 1, error: 1, silent: 1, image: 1 });
+  });
+
+  it("ẩn đoạn ⟦…⟧, số điện thoại, CCCD, email; thiếu dấu đóng thì ẩn hết phần sau", () => {
+    expect(maskPii("Hồ sơ ⟦H12.34-0001⟧ của ⟦Nguyễn Văn A⟧ lỗi")).toBe("Hồ sơ [đã ẩn] của [đã ẩn] lỗi");
+    expect(maskPii("gọi 0912 345 678, +84912345678 hoặc 0912.345.678")).toBe("gọi [đã ẩn], [đã ẩn] hoặc [đã ẩn]");
+    expect(maskPii("CCCD 001234567890 và mail a.b@x.gov.vn")).toBe("CCCD [đã ẩn] và mail [đã ẩn]");
+    expect(maskPii("Tên ⟦Trần Thị B")).toBe("Tên [đã ẩn]");
+    expect(splitPii("a ⟦X⟧ b")).toEqual([{ text: "a ", pii: false }, { text: "X", pii: true }, { text: " b", pii: false }]);
+  });
+
+  it("không ẩn nhầm số ngắn, mã lỗi, ngày tháng", () => {
+    for (const t of ["Lỗi 404", "mã ZXQ-77", "ngày 17/11/2026", "phiên bản 2.10.3", "123456789"]) {
+      expect(maskPii(t)).toBe(t);
+      expect(hasPii(t)).toBe(false);
+    }
+    expect(hasPii(null, undefined, "")).toBe(false);
+    expect(hasPii("x", "⟦A⟧")).toBe(true);
+  });
+
+  it("ô tìm không dò được thông tin đã ẩn và chữ đọc từ ảnh", () => {
+    const rows = [
+      { display_name: "Lan", question: "ký số lỗi, gọi 0912345678", reply_text: "Vào mục Ký số", image_text: "⟦Nguyễn Văn A⟧" },
+      { display_name: "Minh", question: "đổi mật khẩu" },
+    ];
+    expect(filterHistory(rows, "ky so")).toHaveLength(1);
+    expect(filterHistory(rows, "0912345678")).toHaveLength(0);
+    expect(filterHistory(rows, "Nguyễn Văn A")).toHaveLength(0);
+    expect(filterHistory(rows, "minh")).toHaveLength(1);
+    expect(filterHistory(rows, "  ")).toHaveLength(2);
+  });
+
+  it("bộ lọc khớp đúng nhãn: tin gửi lỗi chỉ ở Lỗi", () => {
+    const bad = { outcome: "answered", send_ok: false };
+    expect(logic.matchesKind(bad, "answered")).toBe(false);
+    expect(logic.matchesKind(bad, "error")).toBe(true);
+    expect(logic.matchesKind(bad, "all")).toBe(true);
+    expect(logic.matchesKind({ outcome: "ignored", ignore_reason: "no_mention" }, "all")).toBe(false);
+  });
+
+  it("dung lượng ảnh", () => {
+    expect(formatBytes(512)).toBe("512 B");
+    expect(formatBytes(2048)).toBe("2 KB");
+    expect(formatBytes(3 * 1024 * 1024)).toBe("3.0 MB");
+    expect(formatBytes(null)).toBe("");
+  });
+
+  it("Cài đặt: image_text_enabled mặc định bật, ghi được", () => {
+    expect(settingsFromConfig({}).image_text_enabled).toBe(true);
+    expect(settingsFromConfig({ image_text_enabled: false }).image_text_enabled).toBe(false);
+    const { data } = validateSettings({ ...settingsFromConfig({}), image_text_enabled: false });
+    expect(data.image_text_enabled).toBe(false);
+  });
+});
+
+describe("bước G2: ảnh gốc từ link Zalo", () => {
+  it("chỉ nhận link https, tối đa 2000 ký tự", () => {
+    expect(logic.safePhotoUrl("https://x.example/a.jpg")).toBe("https://x.example/a.jpg");
+    expect(logic.safePhotoUrl("http://x.example/a.jpg")).toBeNull();
+    expect(logic.safePhotoUrl("javascript:alert(1)")).toBeNull();
+    expect(logic.safePhotoUrl("data:image/png;base64,AAAA")).toBeNull();
+    expect(logic.safePhotoUrl("https://x.example/" + "a".repeat(2000))).toBeNull();
+    expect(logic.safePhotoUrl(null)).toBeNull();
+  });
+
+  it("nhãn nút mở", () => {
+    expect(logic.revealLabel(true, true)).toBe("Xem ảnh và thông tin cá nhân");
+    expect(logic.revealLabel(true, false)).toBe("Xem ảnh");
+    expect(logic.revealLabel(false, true)).toBe("Hiện thông tin cá nhân");
+    expect(logic.revealLabel(false, false)).toBeNull();
+  });
+});
+
+describe("quy chi phí AI ra VND", () => {
+  it("làm tròn đến đồng; thiếu số liệu thì null", () => {
+    expect(logic.usdToVnd(0.007, 26350)).toBe(184);
+    expect(logic.usdToVnd(1.5, 26350.5)).toBe(39526);
+    expect(logic.usdToVnd(0, 26350)).toBe(0);
+    expect(logic.usdToVnd(null, 26350)).toBeNull();
+    expect(logic.usdToVnd(1, 0)).toBeNull();
+    expect(logic.usdToVnd(1, undefined)).toBeNull();
+  });
+
+  it("ghi nguồn tỷ giá", () => {
+    const note = logic.fxNote({ rate: 26350, source: "Vietcombank", source_time: "11/17/2026 11:43:14 AM" });
+    expect(note).toContain("Vietcombank");
+    expect(note).toMatch(/26\.350 đ/);
+    expect(note).toContain("cập nhật 11:43 17/11/2026");
+    expect(logic.vcbTime("11/17/2026 1:05:00 PM")).toBe("13:05 17/11/2026");
+    expect(logic.vcbTime("11/17/2026 12:10:00 AM")).toBe("00:10 17/11/2026");
+    expect(logic.vcbTime("lạ")).toBe("lạ");
+    expect(logic.fxNote({ rate: 26350, source: "Vietcombank", stale: true })).toContain("tỷ giá cũ");
+    expect(logic.fxNote(null)).toBe("");
+  });
+});
+
+describe("biểu đồ tròn mục được dùng nhiều nhất", () => {
+  it("summarizeStats tính tổng lượt mọi mục, kể cả ngoài top 10", () => {
+    const hits = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`m${i}`, 1]));
+    const s = logic.summarizeStats([{ id: "2026-11-15", data: { item_hits: hits } }], ["2026-11-15"]);
+    expect(s.topItems).toHaveLength(10);
+    expect(s.itemTotal).toBe(12);
+  });
+
+  it("tối đa 5 mục có tên, phần còn lại gộp 'khác'; tổng phần = 1", () => {
+    const top = [8, 5, 3, 2, 1, 1].map((count, i) => ({ slug: `m${i}`, count }));
+    const sl = logic.pieSlices(top, 25);
+    expect(sl).toHaveLength(6);
+    expect(sl.slice(0, 5).map((x) => x.slug)).toEqual(["m0", "m1", "m2", "m3", "m4"]);
+    expect(sl[5]).toMatchObject({ slug: null, count: 6 });
+    expect(sl.reduce((a, x) => a + x.share, 0)).toBeCloseTo(1);
+  });
+
+  it("ít mục thì không có 'khác'; không có lượt thì rỗng", () => {
+    expect(logic.pieSlices([{ slug: "a", count: 3 }], 3)).toEqual([{ slug: "a", count: 3, share: 1 }]);
+    expect(logic.pieSlices([], 0)).toEqual([]);
+  });
+
+  it("pieArc: cả vòng và nửa vòng", () => {
+    expect(logic.pieArc(0, 1, 10)).toContain("A10 10 0 1 1 0 10");
+    expect(logic.pieArc(0, 0.5, 10)).toBe("M0 0L0 -10A10 10 0 0 1 0 10Z");
+  });
+});
+
+describe("phân trang danh sách", () => {
+  const rows = Array.from({ length: 37 }, (_, i) => i + 1);
+
+  it("số dòng mỗi trang chỉ nhận 10, 20, 50", () => {
+    expect(logic.PAGE_SIZES).toEqual([10, 20, 50]);
+    expect(logic.pageSize("20")).toBe(20);
+    expect(logic.pageSize(50)).toBe(50);
+    expect(logic.pageSize(null)).toBe(10);
+    expect(logic.pageSize("15")).toBe(10);
+  });
+
+  it("cắt trang và kéo trang về khoảng hợp lệ", () => {
+    expect(logic.pageSlice(rows, 1, 10)).toMatchObject({ page: 1, pages: 4, total: 37, from: 1, to: 10 });
+    const last = logic.pageSlice(rows, 4, 10);
+    expect(last.items).toEqual([31, 32, 33, 34, 35, 36, 37]);
+    expect(last).toMatchObject({ from: 31, to: 37 });
+    expect(logic.pageSlice(rows, 9, 20)).toMatchObject({ page: 2, from: 21, to: 37 });
+    expect(logic.pageSlice(rows, 0, 50)).toMatchObject({ page: 1, pages: 1, to: 37 });
+    expect(logic.pageSlice([], 3, 10)).toMatchObject({ page: 1, pages: 1, total: 0, from: 0, to: 0, items: [] });
+  });
+
+  it("nút số trang gọn, có dấu …", () => {
+    expect(logic.pageNumbers(1, 1)).toEqual([1]);
+    expect(logic.pageNumbers(2, 4)).toEqual([1, 2, 3, 4]);
+    expect(logic.pageNumbers(1, 10)).toEqual([1, 2, null, 10]);
+    expect(logic.pageNumbers(5, 10)).toEqual([1, null, 4, 5, 6, null, 10]);
+    expect(logic.pageNumbers(3, 10)).toEqual([1, 2, 3, 4, null, 10]);
   });
 });

@@ -242,6 +242,27 @@ describe("bước C: kho, bộ đếm AI, thống kê, unanswered", () => {
     });
   });
 
+  it("bước F: lượt đọc ảnh tăng cả bộ đếm chung và image_*; lỗi tải ảnh; câu hỏi ảnh trong ngày", async () => {
+    await store.recordAiCall("2026-11", { ok: true, inputTokens: 100, outputTokens: 10 });
+    await store.recordAiCall("2026-11", { ok: true, inputTokens: 2000, outputTokens: 50, image: true });
+    await store.recordAiCall("2026-11", { ok: false, inputTokens: 0, outputTokens: 0, image: true });
+    await store.recordImageFetchError("2026-11");
+    expect(await store.getMonthlyAiCalls("2026-11")).toBe(3);
+    expect(await store.getMonthlyImageAiCalls("2026-11")).toBe(2);
+    expect(await store.getMonthlyImageAiCalls("2026-12")).toBe(0);
+    expect(db.docs.get("usage/2026-11")).toMatchObject({
+      ai_calls: 3,
+      ai_input_tokens: 2100,
+      image_ai_calls: 2,
+      image_ai_errors: 1,
+      image_input_tokens: 2000,
+      image_output_tokens: 50,
+      image_fetch_errors: 1,
+    });
+    await store.recordDailyStat("2026-11-17", { outcome: "handoff", aiError: false, slug: null, image: true });
+    expect(db.docs.get("stats_daily/2026-11-17")).toMatchObject({ questions: 1, image_questions: 1 });
+  });
+
   it("recordDailyStat cộng questions, answered/handoff, ai_errors, item_hits", async () => {
     await store.recordDailyStat("2026-11-16", { outcome: "answered", aiError: false, slug: "ky-so" });
     await store.recordDailyStat("2026-11-16", { outcome: "answered", aiError: false, slug: "ky-so" });
@@ -259,6 +280,29 @@ describe("bước C: kho, bộ đếm AI, thống kê, unanswered", () => {
     db.docs.set("kb_items/ky-so", item("approved", { hit_count: 4 }));
     await store.recordHit("ky-so");
     expect(db.docs.get("kb_items/ky-so")).toMatchObject({ hit_count: 5, last_hit_at: "SERVER_TS" });
+  });
+
+  it("bước F: recordUnanswered tin ảnh ghi source và image_summary; tin chữ không có hai trường này", async () => {
+    await store.recordUnanswered({
+      id: "img_m1",
+      clusterKey: "",
+      sample: "[Ảnh] Màn hình ký số báo lỗi",
+      reason: "no_match",
+      bestGuessSlug: null,
+      bestGuessConfidence: null,
+      source: "image",
+      imageSummary: "Màn hình ký số báo lỗi",
+    });
+    expect(db.docs.get("unanswered/img_m1")).toMatchObject({ source: "image", image_summary: "Màn hình ký số báo lỗi", count: 1 });
+    await store.recordUnanswered({
+      id: "txt",
+      clusterKey: "a",
+      sample: "a",
+      reason: "no_match",
+      bestGuessSlug: null,
+      bestGuessConfidence: null,
+    });
+    expect(db.docs.get("unanswered/txt")).not.toHaveProperty("source");
   });
 
   it("recordUnanswered: tạo new; hỏi lại tăng count, tối đa 3 mẫu; câu ignored quay về new", async () => {

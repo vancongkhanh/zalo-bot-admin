@@ -31,16 +31,62 @@ await env.withSecurityRulesDisabled(async (ctx) => {
   await un("u1", ["Nộp thuế ở đâu ạ?", "nop thue o dau"], 5, "no_match", null, null);
   await un("u2", ["Chữ ký bị lỗi không ký được <b>gấp</b>"], 3, "low_confidence", "ky-so", 0.55);
   await un("u3", ["Quên mật khẩu đăng nhập thì làm sao?"], 1, "ai_error", null, null);
+  // Bước F: câu hỏi bằng ảnh (ảnh không lưu, chỉ có mô tả do AI viết).
+  await setDoc(doc(db, "unanswered", "img_u4"), {
+    cluster_key: "", samples: ["[Ảnh] Màn hình kết xuất báo cáo báo lỗi thiếu mẫu"], count: 1, reason: "no_match",
+    best_guess_slug: null, best_guess_confidence: null, status: "new", first_asked_at: ago(2), last_asked_at: ago(2),
+    source: "image", image_summary: "Màn hình kết xuất báo cáo báo lỗi thiếu mẫu",
+  });
+  // Bước G: lịch sử hỗ trợ (dữ liệu giả hoàn toàn).
+  const conv = (id, h, o) => setDoc(doc(db, "conversations", id), {
+    chat_id: "nhom-gia-1", from_id: "nguoi-gia", display_name: "Người Thử", reply_text: null, ignore_reason: null,
+    error: null, duration_ms: 1200, created_at: ago(h), expire_at: ago(-2000), ...o,
+  });
+  await conv("c1", 1, {
+    question: "cài chữ ký số thế nào <b>gấp</b>", outcome: "answered", matched_slug: "ky-so", confidence: 0.93,
+    reason: null, ai_ms: 900, send_ok: true, reply_text: "Hướng dẫn mẫu cho \"Cài đặt chữ ký số\".\n\nVideo: https://youtu.be/fake",
+    images_sent: 2, image_errors: 0, images_as_links: 1,
+  });
+  await conv("c2", 3, {
+    question: "nộp thuế ở đâu, gọi em 0912 345 678", outcome: "handoff", matched_slug: null, confidence: 0.4,
+    reason: "no_match", ai_ms: 800, send_ok: true, reply_text: "Câu hỏi của anh/chị đã được ghi nhận, chuyên viên sẽ hỗ trợ sớm.",
+    display_name: "Chị Lan", chat_id: "nhom-gia-2",
+  });
+  await conv("c3", 5, {
+    question: "lỗi này là sao", outcome: "answered", matched_slug: "cau-hinh-chu-ky", confidence: 0.81, reason: null,
+    ai_ms: 2100, send_ok: true, reply_text: "Hướng dẫn mẫu cho \"Cấu hình chữ ký và con dấu\".",
+    source: "image", image_bytes: 245000, image_type: "image/png", fetch_ms: 310,
+    image_summary: "Màn hình cấu hình con dấu báo thiếu ảnh dấu",
+    // Bước G2: link ảnh giả (ảnh công khai bất kỳ) để thử hiện ảnh.
+    photo_url: "https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png",
+    image_text: "Cấu hình chữ ký\nĐơn vị: ⟦UBND xã Mẫu⟧\nNgười ký: ⟦Nguyễn Văn A⟧ - ĐT ⟦0987 654 321⟧\nLỗi: Chưa tải ảnh con dấu (mã E-102)",
+  });
+  await conv("c4", 8, {
+    question: "", outcome: "handoff", reason: "image_fetch_error", send_ok: true, source: "image",
+    reply_text: "Câu hỏi của anh/chị đã được ghi nhận, chuyên viên sẽ hỗ trợ sớm.", fetch_ms: 10000,
+    image_bytes: null, image_type: null, image_summary: null, image_text: null,
+    photo_url: "https://photo-zalo.example/het-han.jpg",
+  });
+  await conv("c5", 20, {
+    question: "tin có ảnh", outcome: "ignored", ignore_reason: "image_ai_disabled", source: "image",
+  });
+  await conv("c6", 30, {
+    question: "đổi mật khẩu", outcome: "answered", matched_slug: "doi-mat-khau", confidence: 0.9, send_ok: false,
+    error: "send_failed:500", reply_text: "Hướng dẫn mẫu cho \"Đổi mật khẩu\".",
+  });
+  await conv("c7", 2, { question: "hai người nói chuyện riêng", outcome: "ignored", ignore_reason: "no_mention" });
   for (let n = 0; n < 10; n++) {
     const q = 3 + ((n * 7) % 5);
     await setDoc(doc(db, "stats_daily", day(n)), {
       questions: q, answered: q - 2, handoff: 2, ai_errors: n % 4 === 0 ? 1 : 0,
       item_hits: { "ky-so": q - 3, "cau-hinh-chu-ky": 1 },
+      image_questions: n % 3 === 0 ? 1 : 0,
     });
   }
   const month = day(0).slice(0, 7);
   await setDoc(doc(db, "usage", month), {
     messages_sent: 2510, send_errors: 3, ai_calls: 120, ai_errors: 2, ai_input_tokens: 150000, ai_output_tokens: 3000,
+    image_ai_calls: 4, image_ai_errors: 0, image_input_tokens: 24000, image_output_tokens: 900, image_fetch_errors: 1,
   });
   await setDoc(doc(db, "config", "main"), {
     allowed_chat_ids: ["nhom-gia-1", "nhom-gia-2"], chat_labels: { "nhom-gia-1": "Nhóm thử" },

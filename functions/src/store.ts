@@ -13,7 +13,14 @@ import { KbItem, MAX_SAMPLES, toKbItem } from "./kb";
 export type EventState = "processing" | "done" | "failed";
 /** replied: trả lời kiểu giai đoạn 1; answered/handoff: bước C. */
 export type Outcome = "replied" | "ignored" | "error" | "answered" | "handoff";
-export type HandoffReason = "no_match" | "low_confidence" | "ai_error" | "ai_quota";
+export type HandoffReason =
+  | "no_match"
+  | "low_confidence"
+  | "ai_error"
+  | "ai_quota"
+  // Bước F
+  | "image_quota"
+  | "image_fetch_error";
 
 export interface ConversationRecord {
   chat_id: string | null;
@@ -38,12 +45,24 @@ export interface ConversationRecord {
   images_sent?: number;
   image_errors?: number;
   images_as_links?: number;
+  // Bước F (chỉ có ở tin ảnh). Không bao giờ lưu photo_url hay dữ liệu ảnh.
+  source?: "image";
+  image_bytes?: number | null;
+  image_type?: string | null;
+  image_summary?: string | null;
+  fetch_ms?: number | null;
+  /** Bước G: chữ đọc được trên ảnh; thông tin cá nhân bọc ⟦…⟧, trang quản trị ẩn mặc định. */
+  image_text?: string | null;
+  /** Bước G2: link ảnh của Zalo (chỉ tin ảnh có gọi tên bot), để quản trị xem lại. Không bao giờ ghi log. */
+  photo_url?: string | null;
 }
 
 export interface AiCallRecord {
   ok: boolean;
   inputTokens: number;
   outputTokens: number;
+  /** Bước F: lượt đọc ảnh, tăng thêm các bộ đếm `image_*`. */
+  image?: boolean;
 }
 
 export interface DailyStat {
@@ -52,6 +71,8 @@ export interface DailyStat {
   slug: string | null;
   /** Bước E: số ảnh gửi thành công. */
   photosSent?: number;
+  /** Bước F: câu hỏi bằng ảnh. */
+  image?: boolean;
 }
 
 export interface UnansweredInput {
@@ -61,6 +82,9 @@ export interface UnansweredInput {
   reason: HandoffReason;
   bestGuessSlug: string | null;
   bestGuessConfidence: number | null;
+  /** Bước F: câu hỏi bằng ảnh, kèm mô tả ngắn (chỉ quản trị đọc). */
+  source?: "image";
+  imageSummary?: string | null;
 }
 
 export interface Store {
@@ -86,6 +110,10 @@ export interface Store {
   /** `usage/{month}.ai_calls` (0 nếu chưa có). */
   getMonthlyAiCalls(month: string): Promise<number>;
   recordAiCall(month: string, call: AiCallRecord): Promise<void>;
+  /** Bước F: `usage/{month}.image_ai_calls` (0 nếu chưa có). */
+  getMonthlyImageAiCalls(month: string): Promise<number>;
+  /** Bước F: tăng `image_fetch_errors`. */
+  recordImageFetchError(month: string): Promise<void>;
   /** `stats_daily/{day}`: questions, answered/handoff, ai_errors, item_hits.{slug}. */
   recordDailyStat(day: string, stat: DailyStat): Promise<void>;
   /** Tăng `hit_count`, cập nhật `last_hit_at` của mục. */
@@ -240,19 +268,33 @@ export class FirestoreStore implements Store {
   }
 
   async recordAiCall(month: string, call: AiCallRecord): Promise<void> {
-    await this.db
-      .collection(COLLECTIONS.usage)
-      .doc(month)
-      .set(
-        {
-          ai_calls: FieldValue.increment(1),
-          ai_errors: FieldValue.increment(call.ok ? 0 : 1),
-          ai_input_tokens: FieldValue.increment(call.inputTokens),
-          ai_output_tokens: FieldValue.increment(call.outputTokens),
-          updated_at: FieldValue.serverTimestamp(),
-        },
-        { merge: true },
-      );
+    const data: Record<string, unknown> = {
+      ai_calls: FieldValue.increment(1),
+      ai_errors: FieldValue.increment(call.ok ? 0 : 1),
+      ai_input_tokens: FieldValue.increment(call.inputTokens),
+      ai_output_tokens: FieldValue.increment(call.outputTokens),
+      updated_at: FieldValue.serverTimestamp(),
+    };
+    if (call.image) {
+      data.image_ai_calls = FieldValue.increment(1);
+      data.image_ai_errors = FieldValue.increment(call.ok ? 0 : 1);
+      data.image_input_tokens = FieldValue.increment(call.inputTokens);
+      data.image_output_tokens = FieldValue.increment(call.outputTokens);
+    }
+    await this.db.collection(COLLECTIONS.usage).doc(month).set(data, { merge: true });
+  }
+
+  async getMonthlyImageAiCalls(month: string): Promise<number> {
+    const snap = await this.db.collection(COLLECTIONS.usage).doc(month).get();
+    const v = snap.exists ? snap.get("image_ai_calls") : 0;
+    return typeof v === "number" ? v : 0;
+  }
+
+  async recordImageFetchError(month: string): Promise<void> {
+    await this.db.collection(COLLECTIONS.usage).doc(month).set(
+      { image_fetch_errors: FieldValue.increment(1), updated_at: FieldValue.serverTimestamp() },
+      { merge: true },
+    );
   }
 
   async recordDailyStat(day: string, stat: DailyStat): Promise<void> {
@@ -263,6 +305,7 @@ export class FirestoreStore implements Store {
     };
     if (stat.aiError) data.ai_errors = FieldValue.increment(1);
     if (stat.photosSent) data.photos_sent = FieldValue.increment(stat.photosSent);
+    if (stat.image) data.image_questions = FieldValue.increment(1);
     if (stat.slug) data.item_hits = { [stat.slug]: FieldValue.increment(1) };
     await this.db.collection(COLLECTIONS.statsDaily).doc(day).set(data, { merge: true });
   }
@@ -283,6 +326,7 @@ export class FirestoreStore implements Store {
         reason: input.reason,
         best_guess_slug: input.bestGuessSlug,
         best_guess_confidence: input.bestGuessConfidence,
+        ...(input.source ? { source: input.source, image_summary: input.imageSummary ?? null } : {}),
       };
       if (!snap.exists) {
         tx.create(ref, {

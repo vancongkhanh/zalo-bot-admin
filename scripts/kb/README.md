@@ -28,6 +28,7 @@ Tệp Excel dữ liệu thật đặt trong `input/` (thư mục này không đ�
 | `node kb-approve.mjs slug-1 slug-2` | Duyệt (cần có trả lời, ≥ 2 cách hỏi, có nguồn) |
 | `node kb-hide.mjs slug-1` | Ẩn: bot không dùng, mục vẫn còn |
 | `node kb-list.mjs [--trang-thai=approved]` | Liệt kê |
+| `node check-images.mjs [n]` | Bước E, chỉ đọc: n lần trả lời có ảnh gần nhất (số ảnh gửi, lỗi, `duration_ms`) và bộ đếm tháng |
 | `node eval-import-testset.mjs ../../input/kho.xlsx [--thu]` | Nạp sheet `Bo_thu` vào `eval_testset` |
 | `node eval-run.mjs [--model=haiku\|sonnet] [--nguong=0.7] [--gioi-han=N]` | Chạy bộ thử qua đúng hàm chọn mục của bot (bước C). Không gửi Zalo, không ghi gì vào Firestore. **Tốn phí API** |
 | `npm test` | Kiểm thử đơn vị (không cần mạng) |
