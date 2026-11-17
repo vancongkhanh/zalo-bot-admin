@@ -94,6 +94,11 @@
   .kv { display: grid; grid-template-columns: 130px 1fr; gap: 8px; font-size: 14px; overflow-wrap: anywhere; }
   .quote { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border: 1px solid var(--line);
     border-radius: 8px; padding: 8px 10px; margin: 6px 0; }
+  .photo { position: relative; display: inline-block; max-width: 100%; margin: 6px 0; border-radius: 8px;
+    overflow: hidden; border: 1px solid var(--line); background: var(--chip); }
+  .photo img { display: block; max-width: 100%; max-height: 420px; }
+  .photo img.blur { filter: blur(18px); transform: scale(1.05); }
+  .photo .btn { position: absolute; inset: 0; margin: auto; width: max-content; height: max-content; }
   mark.pii { background: var(--warn-bg); color: var(--warn); border-radius: 4px; padding: 0 3px; }
   @media (max-width: 600px) { .kv { grid-template-columns: 1fr; gap: 0; margin-bottom: 4px; } }
   @media (max-width: 600px) {
@@ -835,6 +840,24 @@ function maskPii(text) {
   return splitPii(text).map((p) => (p.pii ? PII_MASK : p.text)).join("");
 }
 
+/** Bước G2: chỉ dùng link https làm nguồn ảnh. */
+function safePhotoUrl(u) {
+  if (typeof u !== "string" || u.length > 2000) return null;
+  try {
+    return new URL(u).protocol === "https:" ? u : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Nhãn nút mở: ảnh và/hoặc thông tin cá nhân; null nếu không có gì để ẩn. */
+function revealLabel(hasPhoto, hasPiiText) {
+  if (hasPhoto && hasPiiText) return "Xem ảnh và thông tin cá nhân";
+  if (hasPhoto) return "Xem ảnh";
+  if (hasPiiText) return "Hiện thông tin cá nhân";
+  return null;
+}
+
 function formatBytes(n) {
   if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return "";
   if (n < 1024) return `${n} B`;
@@ -1214,6 +1237,8 @@ function historyCard(c) {
   const item = c.matched_slug ? state.kb.get(c.matched_slug) : null;
   const isImage = c.source === "image";
   const piiHere = hasPii(c.question, c.image_text);
+  const photo = isImage ? safePhotoUrl(c.photo_url) : null;
+  const openLabel = revealLabel(!!photo, piiHere);
   const toggle = () => {
     if (isOpen) hist.open.delete(c.id);
     else hist.open.add(c.id);
@@ -1250,7 +1275,7 @@ function historyCard(c) {
     h("div", { class: "row clickable", onclick: toggle, role: "button", tabindex: 0,
       onkeydown: (e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), toggle()) },
       h("span", { class: `chip st-${st.cls}` }, st.label),
-      isImage ? h("span", { class: "chip", title: "Người dùng gửi ảnh; ảnh không được lưu" }, "Ảnh") : null,
+      isImage ? h("span", { class: "chip", title: "Người dùng gửi ảnh" }, "Ảnh") : null,
       h("span", { class: "muted" }, when(c.created_at)),
       h("span", { class: "muted" }, hist.labels[c.chat_id] ?? "Nhóm khác"),
       h("span", { class: "muted" }, c.display_name || "(không tên)"),
@@ -1265,10 +1290,10 @@ function historyCard(c) {
       isImage && c.image_summary ? `Ảnh: ${c.image_summary}` : "",
     ].filter(Boolean).join(" · ")),
     isOpen ? h("div", { class: "histd" },
-      piiHere ? h("div", { class: "row", style: "justify-content:flex-end" },
+      openLabel ? h("div", { class: "row", style: "justify-content:flex-end" },
         revealed
-          ? h("button", { class: "btn", onclick: hide }, "Ẩn thông tin cá nhân")
-          : h("button", { class: "btn", onclick: reveal }, "Hiện thông tin cá nhân")) : null,
+          ? h("button", { class: "btn", onclick: hide }, photo ? "Ẩn lại" : "Ẩn thông tin cá nhân")
+          : h("button", { class: "btn", onclick: reveal }, openLabel)) : null,
       h("section", {},
         h("h4", {}, "Người dùng đã nhắn"),
         meta("Người gửi", c.display_name || "(không tên)"),
@@ -1281,6 +1306,7 @@ function historyCard(c) {
         h("h4", {}, "Thông tin đọc từ ảnh"),
         meta("Mô tả", c.image_summary || "(không có)"),
         meta("Ảnh", [c.image_type, formatBytes(c.image_bytes)].filter(Boolean).join(", ") || null),
+        photoBox(photo, revealed, reveal, c),
         c.image_text
           ? h("div", { class: "quote" }, piiText(c.image_text, revealed))
           : h("p", { class: "muted" }, c.reason === "image_fetch_error"
@@ -1314,6 +1340,26 @@ function historyCard(c) {
     ) : null,
   );
   return card;
+}
+
+/** Ảnh gốc từ link Zalo: mờ đến khi bấm Xem ảnh (ghi pii_views); link hỏng thì báo. */
+function photoBox(photo, revealed, reveal, c) {
+  if (!photo) {
+    return h("p", { class: "muted" }, c.photo_url
+      ? "Link ảnh không hợp lệ."
+      : "Ảnh gửi trước khi bật lưu link, không xem lại được.");
+  }
+  const broken = () => box.replaceWith(h("p", { class: "muted" },
+    "Ảnh không còn mở được trên Zalo (link có thể đã hết hạn)."));
+  const img = h("img", {
+    src: photo, alt: "Ảnh người dùng gửi", referrerpolicy: "no-referrer",
+    class: revealed ? null : "blur", onerror: broken,
+  });
+  const box = h("div", { class: "photo" },
+    revealed
+      ? h("a", { href: photo, target: "_blank", rel: "noopener noreferrer", title: "Mở ảnh cỡ gốc" }, img)
+      : [img, h("button", { class: "btn primary", onclick: reveal }, "Xem ảnh")]);
+  return box;
 }
 
 function piiViewsCard() {
