@@ -60,6 +60,7 @@ Không bao giờ ghi token, secret, khóa hay mã nhóm thật vào mã nguồn,
 |---|---|---|
 | `ZALO_BOT_TOKEN` | Firebase secret | Token bot |
 | `ZALO_WEBHOOK_SECRET` | Firebase secret | 8-256 ký tự, **chỉ `A-Z a-z 0-9 _ -`** (Zalo từ chối ký tự khác). Đang dùng phiên bản 2 |
+| `ZALO_OA_SECRET_KEY`, `ZALO_APP_SECRET_KEY` | Firebase secret | Chỉ hàm `zaloOaWebhook` (OA-0) dùng, để thử chữ ký. **Cả hai phải tồn tại** trước khi deploy hàm này; chưa có khóa thật thì đặt giá trị `none` (hàm ghi `skipped`) |
 | `ANTHROPIC_API_KEY` | Firebase secret | Khóa Anthropic (workspace Zalo-bot, hạn mức chi tiêu tháng đặt ở Anthropic Console). **Phải có trước khi triển khai** hàm, kể cả khi `ai_enabled` tắt. Khóa có hạn dùng: đổi trước khi hết hạn |
 | Mã nhóm | Firestore `config/main` | Không ghi vào mã |
 | Cấu hình Web app Firebase | `admin/index.html` | Công khai theo thiết kế; an toàn dựa vào đăng nhập Google và quy tắc Firestore |
@@ -138,7 +139,7 @@ Nhóm không có trong danh sách: không ghi `conversations`, chỉ ghi dòng C
 
 | Phần | Lệnh | Ghi chú |
 |---|---|---|
-| Hàm | `cd functions`, `npm install`, `npm run build`, `npm test` | 187 kiểm thử |
+| Hàm | `cd functions`, `npm install`, `npm run build`, `npm test` | 219 kiểm thử (riêng OA-0: `npx vitest run test/oaWebhook.test.ts`) |
 | Script kho | `cd scripts/kb`, `npm install`, `npm test` | 50 kiểm thử |
 | Trang quản trị | `cd admin`, `npm install`, `npm test` | 74 kiểm thử logic |
 | Quy tắc Firestore và Storage | `cd admin`, `npm run test:rules` | 98 kiểm thử trên emulator, cần Java 21 (Temurin) |
@@ -148,12 +149,21 @@ Nhóm không có trong danh sách: không ghi `conversations`, chỉ ghi dòng C
 | Việc | Lệnh |
 |---|---|
 | Chỉ hàm | `firebase deploy --only functions` |
+| Chỉ webhook OA-0 | `firebase deploy --only functions:zaloOaWebhook` (không đụng `zaloWebhook`) |
 | Chỉ quy tắc và chỉ mục | `firebase deploy --only firestore` |
 | Cả hai | `firebase deploy --only functions,firestore` |
 | Quy tắc Storage (bước E) | `firebase deploy --only storage`. Chỉ chạy được **sau khi bật Storage** trong Console. Lần đầu CLI có thể hỏi cấp quyền cho Storage đọc Firestore (cần cho kiểm tra `admins`): trả lời Yes |
 | Trang quản trị | Tải `admin/index.html` lên kho GitHub `zalo-bot-admin` (thay tệp cũ). Xem [admin/README.md](admin/README.md) |
 
 Lần triển khai gần nhất: hàm có bước C (16/11/2026 16:21), quy tắc và chỉ mục bước D (16/11/2026). Bước E (16/11/2026): `firebase deploy --only storage`, rồi `--only firestore,functions`. Nên luôn dùng `--only` để triển khai đúng phần cần. Nếu `firebase deploy` báo lỗi "Failed to make request ... adminSdkConfig", chạy lại: thường là lỗi mạng tạm thời.
+
+## Webhook Zalo OA (OA-0)
+
+Hàm `zaloOaWebhook` ([functions/src/oaWebhook.ts](functions/src/oaWebhook.ts), spec [docs/spec-oa-0-webhook-toi-thieu.md](docs/spec-oa-0-webhook-toi-thieu.md)) chỉ nhận và ghi log, luôn trả 200 `{"ok":true}`. Hàm không gửi tin, không gọi API Zalo, không dùng Firestore hay token.
+
+- Log: một dòng `zalo_oa_event` (severity INFO) trong Logs Explorer. Chỉ ghi độ dài text, 8 ký tự băm của ID, tên header, loại đính kèm, `sig_match` theo từng khóa (`oa_key`, `app_key`: `V1`-`V4`, `none` hoặc `skipped`).
+- Đổi khóa: `firebase functions:secrets:set ZALO_OA_SECRET_KEY` (hoặc `ZALO_APP_SECRET_KEY`), rồi `firebase deploy --only functions:zaloOaWebhook`.
+- Lưu ý: `firebase deploy --only functions` (toàn bộ) cũng cần hai secret này tồn tại.
 
 ## Đăng ký webhook
 

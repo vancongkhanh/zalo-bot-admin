@@ -4,6 +4,12 @@ import { defineSecret } from "firebase-functions/params";
 export const ZALO_BOT_TOKEN = defineSecret("ZALO_BOT_TOKEN");
 export const ZALO_WEBHOOK_SECRET = defineSecret("ZALO_WEBHOOK_SECRET");
 export const ANTHROPIC_API_KEY = defineSecret("ANTHROPIC_API_KEY");
+/**
+ * OA-0 (zaloOaWebhook): hai khóa ứng viên để thử chữ ký. Phải tồn tại trong Secret Manager
+ * khi deploy hàm này; chưa có khóa thật thì đặt giá trị `none` (hàm coi là "skipped").
+ */
+export const ZALO_OA_SECRET_KEY = defineSecret("ZALO_OA_SECRET_KEY");
+export const ZALO_APP_SECRET_KEY = defineSecret("ZALO_APP_SECRET_KEY");
 
 /** Cấu hình đọc từ Firestore `config/main`. */
 export interface BotConfig {

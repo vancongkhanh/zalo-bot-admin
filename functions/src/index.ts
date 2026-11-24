@@ -4,8 +4,16 @@ import * as fnLogger from "firebase-functions/logger";
 import { setGlobalOptions } from "firebase-functions/v2";
 import { HttpsError, onCall, onRequest } from "firebase-functions/v2/https";
 import Anthropic from "@anthropic-ai/sdk";
-import { ANTHROPIC_API_KEY, monthKey, ZALO_BOT_TOKEN, ZALO_WEBHOOK_SECRET } from "./config";
+import {
+  ANTHROPIC_API_KEY,
+  monthKey,
+  ZALO_APP_SECRET_KEY,
+  ZALO_BOT_TOKEN,
+  ZALO_OA_SECRET_KEY,
+  ZALO_WEBHOOK_SECRET,
+} from "./config";
 import { FxRate, handleFxRate } from "./fxRate";
+import { createOaHandler } from "./oaWebhook";
 import { FirestoreStore } from "./store";
 import { handleSuggest } from "./suggest";
 import { handleWebhook, Logger } from "./webhook";
@@ -120,3 +128,22 @@ export const usdVndRate = onCall({ timeoutSeconds: 20, maxInstances: 2 }, async 
   if (!r.ok) throw new HttpsError(r.code, r.message);
   return { ...r.rate, stale: r.stale };
 });
+
+/**
+ * OA-0: webhook Zalo OA tối thiểu (docs/spec-oa-0-webhook-toi-thieu.md).
+ * Chỉ nhận và ghi một dòng log; luôn trả 200 {"ok":true}. Không dùng Firestore hay token.
+ */
+const handleOa = createOaHandler({
+  getKeys: () => ({ oa: ZALO_OA_SECRET_KEY.value(), app: ZALO_APP_SECRET_KEY.value() }),
+  log: (entry) => fnLogger.info("zalo_oa_event", entry),
+});
+
+export const zaloOaWebhook = onRequest(
+  {
+    invoker: "public",
+    timeoutSeconds: 10,
+    minInstances: 0,
+    secrets: [ZALO_OA_SECRET_KEY, ZALO_APP_SECRET_KEY],
+  },
+  (req, res) => handleOa(req, res),
+);
