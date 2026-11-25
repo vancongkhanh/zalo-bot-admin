@@ -37,6 +37,25 @@ await env.withSecurityRulesDisabled(async (ctx) => {
     best_guess_slug: null, best_guess_confidence: null, status: "new", first_asked_at: ago(2), last_asked_at: ago(2),
     source: "image", image_summary: "Màn hình kết xuất báo cáo báo lỗi thiếu mẫu",
   });
+  // Trả lời người hỏi: lượt hỏi giả của u1 (u2, u3 là câu cũ, không có pending_ask_count).
+  const askDoc = (uId, id, chatId, name, question, h, extra = {}) => setDoc(doc(db, "unanswered", uId, "asks", id), {
+    chat_id: chatId, chat_type: "GROUP", from_id: `nguoi-${name}`, display_name: name, question, message_id: id,
+    asked_at: ago(h), reply_status: "pending", replied_at: null, reply_error: null, reply_batch_id: null,
+    expire_at: ago(-2000), ...extra,
+  });
+  await setDoc(doc(db, "unanswered", "u1"), { pending_ask_count: 4 }, { merge: true });
+  await askDoc("u1", "a1", "nhom-gia-1", "Chị Lan", "Nộp thuế ở đâu ạ?", 5);
+  await askDoc("u1", "a2", "nhom-gia-1", "Anh Minh", "nop thue o dau", 1);
+  await askDoc("u1", "a3", "nhom-gia-2", "Cô Hoa", "Cho hỏi nộp thuế ở đâu", 3, { reply_status: "failed", reply_error: "timeout: sendMessage: quá 10000 ms" });
+  await askDoc("u1", "a4", "nhom-gia-loi", "Bác Tư", "nộp thuế chỗ nào", 100);
+  // Mục 6.4: đã có đáp án nhưng còn một người chưa được trả lời.
+  await setDoc(doc(db, "unanswered", "u5"), {
+    cluster_key: "cai chu ky so", samples: ["Cài chữ ký số kiểu gì?"], count: 2, reason: "no_match",
+    best_guess_slug: null, best_guess_confidence: null, status: "answered", answered_slug: "ky-so",
+    answered_at: ago(1), first_asked_at: ago(3), last_asked_at: ago(1), pending_ask_count: 1,
+  });
+  await askDoc("u5", "b1", "nhom-gia-2", "Chú Ba", "Cài chữ ký số kiểu gì?", 1);
+  await askDoc("u5", "b2", "nhom-gia-1", "Chị Lan", "cài chữ ký số", 2, { reply_status: "sent" });
   // Bước G: lịch sử hỗ trợ (dữ liệu giả hoàn toàn).
   const conv = (id, h, o) => setDoc(doc(db, "conversations", id), {
     chat_id: "nhom-gia-1", from_id: "nguoi-gia", display_name: "Người Thử", reply_text: null, ignore_reason: null,
@@ -75,6 +94,13 @@ await env.withSecurityRulesDisabled(async (ctx) => {
     error: "send_failed:500", reply_text: "Hướng dẫn mẫu cho \"Đổi mật khẩu\".",
   });
   await conv("c7", 2, { question: "hai người nói chuyện riêng", outcome: "ignored", ignore_reason: "no_mention" });
+  // Bước 6: tin admin gửi từ trang quản trị (Trả lời người hỏi).
+  await conv("admin_reply_batch-gia_1", 0.5, {
+    outcome: "admin_reply", from_id: null, display_name: null, chat_type: "GROUP", question: "cài chữ ký số",
+    reply_text: "📌 Trả lời câu hỏi của Chị Lan (09:00 25/11):\n\"cài chữ ký số\"\n\nHướng dẫn mẫu cho \"Cài đặt chữ ký số\".",
+    matched_slug: "ky-so", send_ok: true, duration_ms: 420, admin_batch_id: "batch-gia", unanswered_id: "u5",
+    ask_ids: ["b2"], reply_to_names: ["Chị Lan"], sent_by: "admin@example.com",
+  });
   for (let n = 0; n < 10; n++) {
     const q = 3 + ((n * 7) % 5);
     await setDoc(doc(db, "stats_daily", day(n)), {

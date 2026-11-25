@@ -40,6 +40,8 @@ export interface BotConfig {
   imageSummaryEnabled: boolean;
   /** Bước G: AI chép chữ đọc được trên ảnh (thông tin cá nhân bọc ⟦…⟧), chỉ lưu cho quản trị. */
   imageTextEnabled: boolean;
+  /** Tên dễ nhớ của nhóm (`chat_labels`, màn Cài đặt). Chỉ để hiển thị, không bao giờ dùng để chọn nhóm gửi. */
+  chatLabels: Record<string, string>;
 }
 
 export const DEFAULT_CONFIG: BotConfig = {
@@ -60,6 +62,7 @@ export const DEFAULT_CONFIG: BotConfig = {
   imageQuotaMessage: "Bot tạm không đọc được ảnh, bạn gõ câu hỏi bằng chữ giúp nhé.",
   imageSummaryEnabled: true,
   imageTextEnabled: true,
+  chatLabels: {},
 };
 
 /** Giới hạn an toàn cho các trường bước C (hàm có timeout 60 giây). */
@@ -204,6 +207,17 @@ export function parseConfig(raw: Record<string, unknown> | undefined): {
     config.imageQuotaMessage = imageQuota.trim();
   } else if (imageQuota !== undefined) {
     warnings.push("image_quota_message trống hoặc quá dài");
+  }
+
+  const labels = raw.chat_labels;
+  if (labels && typeof labels === "object" && !Array.isArray(labels)) {
+    config.chatLabels = Object.fromEntries(
+      Object.entries(labels as Record<string, unknown>).flatMap(([id, v]) =>
+        typeof v === "string" && v.trim() ? [[id, v.trim()]] : [],
+      ),
+    );
+  } else if (labels !== undefined) {
+    warnings.push("chat_labels không phải map");
   }
 
   return { config, warnings };

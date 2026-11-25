@@ -263,11 +263,11 @@ export async function handleWebhook(
     if (isImage) {
       if (!rawPhotoUrl) logger.warn("Tin ảnh khác mẫu: thiếu photo_url", { message_id: messageId });
       const image = { url: rawPhotoUrl ?? "", storedUrl: photoUrl };
-      await answerWithAi({ deps, config, messageId, chatId, question, month, sent, baseRecord, startedAt, now, image });
+      await answerWithAi({ deps, config, messageId, chatId, chatType, question, month, sent, baseRecord, startedAt, now, image });
       return OK;
     }
     if (config.aiEnabled && question) {
-      await answerWithAi({ deps, config, messageId, chatId, question, month, sent, baseRecord, startedAt, now });
+      await answerWithAi({ deps, config, messageId, chatId, chatType, question, month, sent, baseRecord, startedAt, now });
       return OK;
     }
 
@@ -347,6 +347,8 @@ interface AiFlowInput {
   config: BotConfig;
   messageId: string;
   chatId: string;
+  /** Trả lời người hỏi: lưu vào ask, giữ nguyên giá trị Zalo. */
+  chatType: string | null;
   question: string;
   month: string;
   sent: number;
@@ -541,6 +543,15 @@ async function answerWithAi(input: AiFlowInput): Promise<void> {
       bestGuessSlug: okSel?.slug ?? null,
       bestGuessConfidence: okSel?.slug ? okSel.confidence : null,
       ...(isImage ? { source: "image" as const, imageSummary: summary } : {}),
+      // chat_id đích về sau chỉ lấy từ đây (R1): đúng nhóm của chính tin này.
+      ask: {
+        messageId,
+        chatId,
+        chatType: input.chatType,
+        fromId: input.baseRecord.from_id,
+        displayName: input.baseRecord.display_name,
+        question,
+      },
     });
   }
 

@@ -12,7 +12,10 @@ import {
   ZALO_OA_SECRET_KEY,
   ZALO_WEBHOOK_SECRET,
 } from "./config";
+import { randomUUID } from "node:crypto";
+import { handleSendReply, handleSkipAsks, ReplyDeps } from "./adminReply";
 import { FxRate, handleFxRate } from "./fxRate";
+import { FirestoreReplyRepo } from "./replyStore";
 import { createOaHandler } from "./oaWebhook";
 import { FirestoreStore } from "./store";
 import { handleSuggest } from "./suggest";
@@ -127,6 +130,45 @@ export const usdVndRate = onCall({ timeoutSeconds: 20, maxInstances: 2 }, async 
   });
   if (!r.ok) throw new HttpsError(r.code, r.message);
   return { ...r.rate, stale: r.stale };
+});
+
+function replyDeps(): ReplyDeps {
+  store ??= new FirestoreStore(getFirestore());
+  const db = getFirestore();
+  return {
+    isAdmin: async (uid) => (await db.collection("admins").doc(uid).get()).exists,
+    repo: new FirestoreReplyRepo(db),
+    getConfig: async () => (await (store as FirestoreStore).getConfig()).config,
+    getZaloClient: () => createZaloClient({ token: ZALO_BOT_TOKEN.value() }),
+    logger,
+    newBatchId: () => randomUUID().replace(/-/g, ""),
+  };
+}
+
+const callerOf = (auth: { uid: string; token: { email?: string } } | undefined) => ({
+  uid: auth?.uid,
+  email: auth?.token?.email ?? null,
+});
+
+/**
+ * Trang quản trị: gửi đáp án vào đúng nhóm của những người đã hỏi (docs/spec-tra-loi-nguoi-hoi.md, mục 5).
+ * Chỉ người trong admins gọi được. chat_id đích lấy từ ask đã lưu, không từ input.
+ * Gửi tuần tự, nghỉ 500 ms giữa các nhóm; timeout dài để đủ cho nhiều nhóm.
+ */
+export const sendReplyToAskers = onCall(
+  { secrets: [ZALO_BOT_TOKEN], timeoutSeconds: 540, maxInstances: 2 },
+  async (request) => {
+    const r = await handleSendReply(callerOf(request.auth), request.data, replyDeps());
+    if (!r.ok) throw new HttpsError(r.code, r.message);
+    return { batchId: r.batchId, results: r.results };
+  },
+);
+
+/** Trang quản trị: đánh dấu bỏ qua (không gửi) một số lượt hỏi. */
+export const skipAsks = onCall({ timeoutSeconds: 30, maxInstances: 2 }, async (request) => {
+  const r = await handleSkipAsks(callerOf(request.auth), request.data, replyDeps());
+  if (!r.ok) throw new HttpsError(r.code, r.message);
+  return { skipped: r.skipped, unchanged: r.unchanged };
 });
 
 /**

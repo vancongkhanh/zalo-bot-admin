@@ -115,6 +115,20 @@ service cloud.firestore {
       allow create, delete: if false;
     }
 
+    // ---------- Trả lời người hỏi (docs/spec-tra-loi-nguoi-hoi.md, mục 7) ----------
+    // Lượt hỏi: chỉ webhook và hàm sendReplyToAskers/skipAsks ghi (Admin SDK). Trang chỉ đọc.
+    // {path=**} để đọc được cả truy vấn collectionGroup("asks"); chỉ unanswered có subcollection asks.
+    // pending_ask_count ở unanswered/{id} không nằm trong danh sách trường trang được sửa ở trên.
+    match /{path=**}/asks/{askId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+    // Lịch sử các lần gửi trả lời: chỉ hàm sendReplyToAskers ghi.
+    match /admin_replies/{batchId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
     // ---------- chỉ đọc ----------
     match /stats_daily/{day} {
       allow read: if isAdmin();
@@ -182,6 +196,6 @@ service cloud.firestore {
       allow create, delete: if false;
     }
 
-    // processed_events, eval_testset và mọi thứ khác: không mở cho client.
+    // processed_events, eval_testset, fx_rates và mọi thứ khác: không mở cho client.
   }
 }

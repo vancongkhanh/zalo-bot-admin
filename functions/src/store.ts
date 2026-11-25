@@ -85,7 +85,24 @@ export interface UnansweredInput {
   /** Bước F: câu hỏi bằng ảnh, kèm mô tả ngắn (chỉ quản trị đọc). */
   source?: "image";
   imageSummary?: string | null;
+  /** Trả lời người hỏi, bước 2: lượt hỏi này, ghi vào `unanswered/{id}/asks/{messageId}`. */
+  ask?: AskInput;
 }
+
+/** Một lượt hỏi (spec trả lời người hỏi, mục 4.1). Tên trường theo `conversations`. */
+export interface AskInput {
+  /** Cũng là mã tài liệu ask: Zalo gửi lại cùng tin thì không tạo ask thứ hai. */
+  messageId: string;
+  chatId: string;
+  /** Giữ nguyên giá trị Zalo trả về. */
+  chatType: string | null;
+  fromId: string | null;
+  displayName: string | null;
+  /** Câu hỏi đã bỏ @bot; store cắt còn MAX_ASK_QUESTION_CHARS. */
+  question: string;
+}
+
+export type AskReplyStatus = "pending" | "sent" | "failed" | "skipped";
 
 export interface Store {
   getConfig(): Promise<{ config: BotConfig; warnings: string[] }>;
@@ -118,7 +135,10 @@ export interface Store {
   recordDailyStat(day: string, stat: DailyStat): Promise<void>;
   /** Tăng `hit_count`, cập nhật `last_hit_at` của mục. */
   recordHit(slug: string): Promise<void>;
-  /** Ghi hoặc gộp vào `unanswered/{id}` (count tăng nguyên tử). */
+  /**
+   * Ghi hoặc gộp vào `unanswered/{id}` (count tăng nguyên tử). Có `ask` thì cùng transaction
+   * tạo `asks/{messageId}` (pending) và tăng `pending_ask_count`; ask đã có thì không tạo lại.
+   */
   recordUnanswered(input: UnansweredInput): Promise<void>;
 }
 
@@ -130,7 +150,11 @@ export const COLLECTIONS = {
   kb: "kb_items",
   statsDaily: "stats_daily",
   unanswered: "unanswered",
+  /** Subcollection của `unanswered/{id}`. */
+  asks: "asks",
 } as const;
+
+export const MAX_ASK_QUESTION_CHARS = 500;
 
 export const KB_CACHE_MS = 60 * 1000;
 export const CONVERSATION_TTL_MS = 90 * 24 * 60 * 60 * 1000;
@@ -319,8 +343,31 @@ export class FirestoreStore implements Store {
 
   async recordUnanswered(input: UnansweredInput): Promise<void> {
     const ref = this.db.collection(COLLECTIONS.unanswered).doc(input.id);
+    const ask = input.ask;
+    const askRef = ask ? ref.collection(COLLECTIONS.asks).doc(ask.messageId) : null;
     await this.db.runTransaction(async (tx) => {
+      // Mọi lần đọc phải trước mọi lần ghi trong transaction.
       const snap = await tx.get(ref);
+      const askSnap = askRef ? await tx.get(askRef) : null;
+      const addAsk = !!(ask && askRef && askSnap && !askSnap.exists);
+      if (addAsk) {
+        tx.create(askRef!, {
+          chat_id: ask!.chatId,
+          chat_type: ask!.chatType,
+          from_id: ask!.fromId,
+          display_name: ask!.displayName,
+          question: Array.from(ask!.question).slice(0, MAX_ASK_QUESTION_CHARS).join(""),
+          message_id: ask!.messageId,
+          ...(input.source ? { source: input.source } : {}),
+          asked_at: FieldValue.serverTimestamp(),
+          reply_status: "pending" satisfies AskReplyStatus,
+          replied_at: null,
+          reply_error: null,
+          reply_batch_id: null,
+          // Cùng hạn lưu với conversations (90 ngày).
+          expire_at: Timestamp.fromMillis(this.now() + CONVERSATION_TTL_MS),
+        });
+      }
       const base = {
         last_asked_at: FieldValue.serverTimestamp(),
         reason: input.reason,
@@ -338,11 +385,13 @@ export class FirestoreStore implements Store {
           status: "new",
           answered_slug: null,
           answered_at: null,
+          pending_ask_count: addAsk ? 1 : 0,
         });
         return;
       }
       const samples = (snap.get("samples") as unknown[] | undefined)?.filter((x) => typeof x === "string") ?? [];
       const update: Record<string, unknown> = { ...base, count: FieldValue.increment(1) };
+      if (addAsk) update.pending_ask_count = FieldValue.increment(1);
       if (samples.length < MAX_SAMPLES && !samples.includes(input.sample)) {
         update.samples = FieldValue.arrayUnion(input.sample);
       }

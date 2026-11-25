@@ -359,7 +359,10 @@ describe("bước G: lịch sử hỗ trợ", () => {
 
   it("Tất cả = các kết quả có gọi tên bot, cộng tin bot không trả lời; không có no_mention", () => {
     const all = historyClauses("all");
-    expect(all).toEqual([["outcome", ["answered", "replied", "handoff", "error"]], ["ignore_reason", SILENT_REASONS]]);
+    expect(all).toEqual([
+      ["outcome", ["answered", "replied", "handoff", "error", "admin_reply"]], ["ignore_reason", SILENT_REASONS],
+    ]);
+    expect(historyClauses("admin")).toEqual([["outcome", ["admin_reply"]]]);
     expect(JSON.stringify(all)).not.toContain("no_mention");
     expect(historyClauses("answered")).toEqual([["outcome", ["answered", "replied"]]]);
     expect(historyClauses("error")).toEqual([["outcome", ["error"]], ["send_ok", [false]]]);
@@ -389,7 +392,22 @@ describe("bước G: lịch sử hỗ trợ", () => {
     expect(historySummary([
       { outcome: "answered", source: "image" }, { outcome: "handoff" }, { outcome: "error" },
       { outcome: "ignored", ignore_reason: "quota" },
-    ])).toEqual({ total: 4, answered: 1, handoff: 1, error: 1, silent: 1, image: 1 });
+    ])).toEqual({ total: 4, answered: 1, handoff: 1, error: 1, silent: 1, admin: 0, image: 1 });
+  });
+
+  it("Bước 6: tin admin gửi hiện với nhãn riêng, tên người được trả lời, tìm được theo tên", () => {
+    const a = { outcome: "admin_reply", send_ok: true, display_name: null, reply_to_names: ["Lan", "Minh"],
+      question: "nộp thuế ở đâu", reply_text: "📌 Trả lời câu hỏi của Lan, Minh" };
+    expect(isHistoryRecord(a)).toBe(true);
+    expect(historyStatus(a)).toEqual({ key: "admin", label: "Admin trả lời", cls: "admin" });
+    expect(logic.matchesKind(a, "admin")).toBe(true);
+    expect(logic.matchesKind(a, "answered")).toBe(false);
+    expect(logic.matchesKind(a, "all")).toBe(true);
+    expect(logic.historyPeople(a)).toBe("Lan, Minh");
+    expect(logic.historyPeople({ ...a, reply_to_names: [] })).toBe("(không tên)");
+    expect(logic.historyPeople({ outcome: "answered", display_name: "Hoa" })).toBe("Hoa");
+    expect(historySummary([a, { outcome: "answered" }])).toMatchObject({ total: 2, admin: 1, answered: 1 });
+    expect(filterHistory([a, { display_name: "Hoa", question: "x" }], "minh")).toEqual([a]);
   });
 
   it("ẩn đoạn ⟦…⟧, số điện thoại, CCCD, email; thiếu dấu đóng thì ẩn hết phần sau", () => {
@@ -540,5 +558,86 @@ describe("phân trang danh sách", () => {
     expect(logic.pageNumbers(1, 10)).toEqual([1, 2, null, 10]);
     expect(logic.pageNumbers(5, 10)).toEqual([1, null, 4, 5, 6, null, 10]);
     expect(logic.pageNumbers(3, 10)).toEqual([1, 2, 3, 4, null, 10]);
+  });
+});
+
+// ---------- Trả lời người hỏi (bước 5) ----------
+import { readFileSync } from "node:fs";
+
+describe("buildReplyMessage: bản chép khớp bộ mẫu chung với functions", () => {
+  const fixture = JSON.parse(readFileSync(new URL("../../functions/test/fixtures/reply-message.json", import.meta.url), "utf8"));
+  for (const c of fixture.cases) {
+    it(c.name, () => {
+      const asks = c.asks.map(({ askedAt, ...a }) => ({ ...a, askedAtMs: askedAt ? Date.parse(askedAt) : null }));
+      expect(logic.buildReplyMessage(asks, c.answer)).toBe(c.expected);
+    });
+  }
+  it("câu gốc cắt 200 ký tự", () => {
+    const q = logic.replyQuote({ question: "ệ".repeat(250) });
+    expect(Array.from(q)).toHaveLength(201);
+  });
+});
+
+describe("trả lời người hỏi: hàm phụ của trang", () => {
+  const NOW = Date.parse("2026-11-25T03:00:00Z");
+  const ts = (ms) => ({ toMillis: () => ms });
+  const a = (id, chatId, fromId, hoursAgo, extra = {}) => ({
+    id, chatId, chatType: "GROUP", fromId, displayName: fromId, question: `q-${id}`, askedAtMs: NOW - hoursAgo * 3600e3,
+    source: null, status: "pending", error: null, ...extra,
+  });
+
+  it("askFromDoc đọc tài liệu ask; thiếu trường thì mặc định an toàn", () => {
+    expect(logic.askFromDoc("m1", {
+      chat_id: "g1", chat_type: "GROUP", from_id: "u1", display_name: "X", question: "q",
+      asked_at: ts(5), reply_status: "failed", reply_error: "api_error: x", source: "image",
+    })).toEqual({
+      id: "m1", chatId: "g1", chatType: "GROUP", fromId: "u1", displayName: "X", question: "q",
+      askedAtMs: 5, source: "image", status: "failed", error: "api_error: x",
+    });
+    expect(logic.askFromDoc("m2", {})).toMatchObject({ chatId: null, question: "", askedAtMs: null, status: "pending" });
+  });
+
+  it("askSummary: chỉ đếm ask còn chờ (pending, failed); người theo from_id, nhóm theo chat_id", () => {
+    expect(logic.askSummary([
+      a("1", "g1", "u1", 1), a("2", "g1", "u1", 2), a("3", "g2", "u2", 1, { status: "failed" }),
+      a("4", "g3", "u3", 1, { status: "sent" }), a("5", "g4", "u4", 1, { status: "skipped" }),
+    ])).toEqual({ asks: 3, people: 2, chats: 2 });
+  });
+
+  it("askFlags: quá 72 giờ → cảnh báo, bỏ chọn; nhóm không còn trong cấu hình → bỏ chọn; thiếu chat_id → bỏ chọn", () => {
+    const opts = { nowMs: NOW, allowedChatIds: ["g1"] };
+    expect(logic.askFlags(a("1", "g1", "u1", 71), opts)).toEqual({ oldDays: null, notAllowed: false, noChat: false, preselect: true });
+    expect(logic.askFlags(a("1", "g1", "u1", 24 * 4), opts)).toMatchObject({ oldDays: 4, preselect: false });
+    expect(logic.askFlags(a("1", "g9", "u1", 1), opts)).toMatchObject({ notAllowed: true, preselect: false });
+    expect(logic.askFlags(a("1", "u1", "u1", 1, { chatType: "PRIVATE" }), opts)).toMatchObject({ notAllowed: false, preselect: true });
+    expect(logic.askFlags(a("1", null, "u1", 1), opts)).toMatchObject({ noChat: true, preselect: false });
+  });
+
+  it("replyPlan: mỗi nhóm một tin chỉ có người của nhóm đó; đo tin dài nhất", () => {
+    const plan = logic.replyPlan([a("1", "g1", "X", 3), a("2", "g2", "Y", 2), a("3", "g1", "Z", 1)], "Đáp án");
+    expect(plan.groups.map((g) => [g.chatId, g.asks.map((x) => x.id)])).toEqual([["g1", ["1", "3"]], ["g2", ["2"]]]);
+    expect(plan.groups[0].text).toBe('📌 Trả lời câu hỏi của X, Z:\n"q-3"\n\nĐáp án');
+    expect(plan.groups[1].text).not.toContain("X");
+    expect(plan.sendable).toBe(2);
+    expect(plan.over).toBe(false);
+    const long = logic.replyPlan([a("1", "g1", "X", 1)], "x".repeat(1990));
+    expect(long.over).toBe(true);
+    expect(long.maxLength).toBeGreaterThan(2000);
+  });
+
+  it("defaultReplyAnswer: nội dung + link như bot gửi; chatDisplayName", () => {
+    expect(logic.defaultReplyAnswer({ answer: "Vào mục Thuế.", links: [{ label: "Video", url: "https://youtu.be/x" }, { url: "http://x" }] }))
+      .toBe("Vào mục Thuế.\n\nVideo: https://youtu.be/x");
+    expect(logic.defaultReplyAnswer({ answer: " A ", links: [] })).toBe("A");
+    expect(logic.chatDisplayName("g1", "GROUP", { g1: "Nhóm A" })).toBe("Nhóm A");
+    expect(logic.chatDisplayName("zgr-0123456789ABCDEF", "GROUP", {})).toBe("Nhóm zgr-0123…CDEF");
+    expect(logic.chatDisplayName("u1", "PRIVATE", {})).toBe("Chat riêng");
+  });
+
+  it("replyResultLabel", () => {
+    expect(logic.replyResultLabel({ status: "sent" })).toMatchObject({ icon: "✅" });
+    expect(logic.replyResultLabel({ status: "failed", error: "TEXT_TOO_LONG" }).text).toBe("Lỗi: Tin quá 2.000 ký tự");
+    expect(logic.replyResultLabel({ status: "failed", error: "api_error[-201]: x" }).text).toBe("Lỗi: api_error[-201]: x");
+    expect(logic.replyResultLabel({ status: "skipped", error: "ALREADY_SENT" }).text).toBe("Đã gửi trước đó");
   });
 });

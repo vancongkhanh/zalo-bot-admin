@@ -3,7 +3,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { BotConfig, DEFAULT_CONFIG } from "../src/config";
 import type { KbItem } from "../src/kb";
 import type { AiClient } from "../src/selector";
-import type { AiCallRecord, ConversationRecord, DailyStat, Store, UnansweredInput } from "../src/store";
+import type { AiCallRecord, AskInput, ConversationRecord, DailyStat, Store, UnansweredInput } from "../src/store";
 import type { FetchedImage } from "../src/imageFetch";
 import { handleWebhook, Logger, MAX_PHOTO_URL_CHARS, redactBody, storablePhotoUrl, WebhookDeps } from "../src/webhook";
 import type { ZaloClient, ZaloResult } from "../src/zaloClient";
@@ -26,6 +26,8 @@ class FakeStore implements Store {
   daily: { day: string; stat: DailyStat }[] = [];
   hits: string[] = [];
   unanswered = new Map<string, UnansweredInput & { count: number }>();
+  /** Mọi ask được truyền vào recordUnanswered, theo thứ tự. */
+  asks: (AskInput & { unansweredId: string })[] = [];
 
   private u(month: string) {
     if (!this.usage.has(month)) this.usage.set(month, { messages_sent: 0, send_errors: 0, warned: false });
@@ -104,6 +106,7 @@ class FakeStore implements Store {
   async recordUnanswered(input: UnansweredInput) {
     const prev = this.unanswered.get(input.id);
     this.unanswered.set(input.id, { ...input, count: (prev?.count ?? 0) + 1 });
+    if (input.ask) this.asks.push({ ...input.ask, unansweredId: input.id });
   }
 }
 
@@ -559,6 +562,60 @@ describe("bước C: ai_enabled = true", () => {
     setupAi(async () => aiReply('{"slug":null,"confidence":0.9}'), { logRawBody: false });
     await ask("@Bot TTHC Đảng câu hỏi bí mật số 123");
     expect(JSON.stringify(log.lines)).not.toContain("bí mật");
+  });
+});
+
+describe("trả lời người hỏi, bước 2: webhook ghi ask", () => {
+  it("A1: câu ngoài kho → ask có đúng chat_id, chat_type, người hỏi, câu đã bỏ @bot", async () => {
+    setupAi(async () => aiReply('{"slug":null,"confidence":0.9}'));
+    await ask("@Bot TTHC Đảng Cách nộp thuế?");
+    const u = [...store.unanswered.keys()];
+    expect(store.asks).toEqual([
+      {
+        unansweredId: u[0],
+        messageId: "FAKEMSG00000000000001",
+        chatId: GROUP,
+        chatType: "GROUP",
+        fromId: "FAKEUSER0000000000001",
+        displayName: "Ten Nguoi Dung",
+        question: "Cách nộp thuế?",
+      },
+    ]);
+  });
+
+  it("A2: hai người ở hai nhóm hỏi cùng câu → cùng unanswered, mỗi ask giữ nhóm của mình", async () => {
+    setupAi(async () => aiReply('{"slug":null,"confidence":0.9}'), { allowedChatIds: [GROUP, OTHER_GROUP] });
+    await handleWebhook(post(textEvent({ id: "m-a", text: "@Bot TTHC Đảng Nộp thuế ở đâu?" })), deps);
+    const other = textEvent({ id: "m-b", text: "@Bot TTHC Đảng nop thue o dau", chatId: OTHER_GROUP });
+    other.message.from = { id: "FAKEUSER0000000000002", display_name: "Nguoi Khac", is_bot: false };
+    await handleWebhook(post(other), deps);
+    expect(store.unanswered.size).toBe(1);
+    expect(store.asks.map((a) => [a.messageId, a.chatId, a.displayName])).toEqual([
+      ["m-a", GROUP, "Ten Nguoi Dung"],
+      ["m-b", OTHER_GROUP, "Nguoi Khac"],
+    ]);
+    expect(new Set(store.asks.map((a) => a.unansweredId)).size).toBe(1);
+  });
+
+  it("A13: trả lời được, ai tắt, nhóm lạ, không gọi tên bot → không ghi ask; tin gửi đi không đổi", async () => {
+    setupAi(async () => aiReply('{"slug":"ky-so","confidence":0.93}'));
+    await ask("@Bot TTHC Đảng ký số làm sao");
+    expect(zalo.sendMessage).toHaveBeenCalledWith(GROUP, "Vào mục Ký số, chọn chứng thư.\n\nVideo: https://youtu.be/fake");
+    await ask("ký số làm sao", "m-no-mention");
+    await handleWebhook(post(textEvent({ id: "m-x", chatId: OTHER_GROUP, text: "@Bot TTHC Đảng ? " })), deps);
+    expect(store.asks).toEqual([]);
+    setup();
+    await ask("@Bot TTHC Đảng Cách nộp thuế?");
+    expect(zalo.sendMessage).toHaveBeenCalledWith(GROUP, "Đã nhận: Cách nộp thuế?");
+    expect(store.asks).toEqual([]);
+  });
+
+  it("tin ảnh ngoài kho → ask theo tin ảnh, câu là chú thích đã bỏ @bot, không có link ảnh", async () => {
+    setupImageAi('{"slug":null,"confidence":0.9,"mo_ta":"x"}');
+    await sendImage({ id: "img1", caption: "@Bot TTHC Đảng lỗi này là sao" });
+    expect(store.asks).toHaveLength(1);
+    expect(store.asks[0]).toMatchObject({ unansweredId: expect.any(String), messageId: "img1", chatId: GROUP, question: "lỗi này là sao" });
+    expect(JSON.stringify(store.asks)).not.toContain("photo-zalo.example");
   });
 });
 

@@ -27,6 +27,15 @@ describe("parseConfig", () => {
     });
   });
 
+  it("chat_labels: giữ nhãn chuỗi không rỗng (đã cắt khoảng trắng); sai kiểu thì cảnh báo", () => {
+    expect(DEFAULT_CONFIG.chatLabels).toEqual({});
+    const { config } = parseConfig({ chat_labels: { "zgr-a": " Nhóm A ", "zgr-b": "", "zgr-c": 5 } });
+    expect(config.chatLabels).toEqual({ "zgr-a": "Nhóm A" });
+    const bad = parseConfig({ chat_labels: ["x"] });
+    expect(bad.config.chatLabels).toEqual({});
+    expect(bad.warnings).toEqual(["chat_labels không phải map"]);
+  });
+
   it("sai kiểu → dùng mặc định và cảnh báo", () => {
     const { config, warnings } = parseConfig({ allowed_chat_ids: "zgr-a", reply_enabled: "true" });
     expect(config.allowedChatIds).toEqual([]);

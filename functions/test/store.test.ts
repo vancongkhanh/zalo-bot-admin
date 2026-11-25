@@ -16,97 +16,7 @@ vi.mock("firebase-admin/firestore", () => ({
 import { CONVERSATION_TTL_MS, EVENT_TTL_MS, FirestoreStore, KB_CACHE_MS } from "../src/store";
 import type { Firestore } from "firebase-admin/firestore";
 
-type Data = Record<string, unknown>;
-
-class FakeDb {
-  docs = new Map<string, Data>();
-  failNextCreateWith: unknown = null;
-
-  private apply(prev: Data | undefined, patch: Data): Data {
-    const out: Data = { ...(prev ?? {}) };
-    for (const [k, v] of Object.entries(patch)) {
-      if (v && typeof v === "object" && "__inc" in v) {
-        out[k] = ((out[k] as number) ?? 0) + (v as { __inc: number }).__inc;
-      } else if (v && typeof v === "object" && "__ts" in v) {
-        out[k] = "SERVER_TS";
-      } else if (v && typeof v === "object" && "__union" in v) {
-        const prevArr = (out[k] as unknown[]) ?? [];
-        out[k] = [...prevArr, ...(v as { __union: unknown[] }).__union.filter((x) => !prevArr.includes(x))];
-      } else if (
-        v &&
-        typeof v === "object" &&
-        !Array.isArray(v) &&
-        Object.values(v).some((x) => x && typeof x === "object" && "__inc" in x)
-      ) {
-        out[k] = this.apply(out[k] as Data | undefined, v as Data);
-      } else {
-        out[k] = v;
-      }
-    }
-    return out;
-  }
-
-  private snap(path: string) {
-    const d = this.docs.get(path);
-    return { exists: d !== undefined, data: () => d, get: (f: string) => d?.[f] };
-  }
-
-  private ref(path: string) {
-    return {
-      path,
-      get: async () => this.snap(path),
-      create: async (data: Data) => {
-        if (this.failNextCreateWith) {
-          const e = this.failNextCreateWith;
-          this.failNextCreateWith = null;
-          throw e;
-        }
-        if (this.docs.has(path)) throw Object.assign(new Error("6 ALREADY_EXISTS: Document already exists"), { code: 6 });
-        this.docs.set(path, this.apply(undefined, data));
-      },
-      update: async (data: Data) => {
-        if (!this.docs.has(path)) throw Object.assign(new Error("5 NOT_FOUND"), { code: 5 });
-        this.docs.set(path, this.apply(this.docs.get(path), data));
-      },
-      set: async (data: Data, opts?: { merge?: boolean }) => {
-        this.docs.set(path, this.apply(opts?.merge ? this.docs.get(path) : undefined, data));
-      },
-    };
-  }
-
-  reads = 0;
-
-  collection(name: string) {
-    return {
-      doc: (id: string) => this.ref(`${name}/${id}`),
-      where: (field: string, _op: string, value: unknown) => ({
-        get: async () => {
-          this.reads++;
-          const docs = [...this.docs.entries()]
-            .filter(([p, d]) => p.startsWith(`${name}/`) && d[field] === value)
-            .map(([p, d]) => ({ id: p.slice(name.length + 1), data: () => d }));
-          return { docs };
-        },
-      }),
-    };
-  }
-
-  async runTransaction<T>(fn: (tx: unknown) => Promise<T>): Promise<T> {
-    const tx = {
-      get: (ref: { path: string }) => Promise.resolve(this.snap(ref.path)),
-      set: (ref: { path: string }, data: Data, opts?: { merge?: boolean }) => {
-        this.docs.set(ref.path, this.apply(opts?.merge ? this.docs.get(ref.path) : undefined, data));
-      },
-      create: (ref: { path: string }, data: Data) => {
-        this.docs.set(ref.path, this.apply(undefined, data));
-      },
-      update: (ref: { path: string }, data: Data) => {
-        this.docs.set(ref.path, this.apply(this.docs.get(ref.path), data));
-      },
-    };
-    return fn(tx);
-  }
-}
+import { Data, FakeDb } from "./helpers/fakeDb";
 
 const NOW = Date.parse("2026-11-16T03:00:00Z");
 let db: FakeDb;
@@ -341,5 +251,87 @@ describe("bước C: kho, bộ đếm AI, thống kê, unanswered", () => {
       best_guess_slug: "ky-so",
       best_guess_confidence: 0.4,
     });
+  });
+});
+
+describe("trả lời người hỏi, bước 2: asks và pending_ask_count", () => {
+  const base = {
+    id: "abc",
+    clusterKey: "nop thue o dau",
+    sample: "Nộp thuế ở đâu?",
+    reason: "no_match" as const,
+    bestGuessSlug: null,
+    bestGuessConfidence: null,
+  };
+  const ask = (messageId: string, chatId: string, fromId: string, displayName: string, question = "Nộp thuế ở đâu?") => ({
+    messageId,
+    chatId,
+    chatType: "GROUP",
+    fromId,
+    displayName,
+    question,
+  });
+
+  it("A1: câu mới → 1 ask pending đúng nhóm, người, câu gốc; pending_ask_count = 1", async () => {
+    await store.recordUnanswered({ ...base, ask: ask("m1", "zgr-a", "u1", "Người A") });
+    expect(db.docs.get("unanswered/abc")).toMatchObject({ count: 1, status: "new", pending_ask_count: 1 });
+    expect(db.docs.get("unanswered/abc/asks/m1")).toEqual({
+      chat_id: "zgr-a",
+      chat_type: "GROUP",
+      from_id: "u1",
+      display_name: "Người A",
+      question: "Nộp thuế ở đâu?",
+      message_id: "m1",
+      asked_at: "SERVER_TS",
+      reply_status: "pending",
+      replied_at: null,
+      reply_error: null,
+      reply_batch_id: null,
+      expire_at: { __ms: NOW + CONVERSATION_TTL_MS },
+    });
+  });
+
+  it("A2: hai người ở hai nhóm hỏi cùng câu → cùng một unanswered, 2 ask riêng, pending_ask_count = 2", async () => {
+    await store.recordUnanswered({ ...base, ask: ask("m1", "zgr-a", "u1", "Người A") });
+    await store.recordUnanswered({ ...base, sample: "nop thue o dau", ask: ask("m2", "zgr-b", "u2", "Người B", "nop thue o dau") });
+    expect(db.docs.get("unanswered/abc")).toMatchObject({ count: 2, pending_ask_count: 2 });
+    expect(db.docs.get("unanswered/abc/asks/m1")).toMatchObject({ chat_id: "zgr-a", display_name: "Người A" });
+    expect(db.docs.get("unanswered/abc/asks/m2")).toMatchObject({
+      chat_id: "zgr-b",
+      display_name: "Người B",
+      question: "nop thue o dau",
+    });
+  });
+
+  it("cùng message_id ghi lại → không tạo ask thứ hai, không tăng pending_ask_count", async () => {
+    await store.recordUnanswered({ ...base, ask: ask("m1", "zgr-a", "u1", "Người A") });
+    db.docs.set("unanswered/abc/asks/m1", { ...db.docs.get("unanswered/abc/asks/m1")!, reply_status: "sent" });
+    await store.recordUnanswered({ ...base, ask: ask("m1", "zgr-a", "u1", "Người A") });
+    expect(db.docs.get("unanswered/abc")?.pending_ask_count).toBe(1);
+    expect(db.docs.get("unanswered/abc/asks/m1")?.reply_status).toBe("sent");
+  });
+
+  it("câu đã answered được hỏi lại → thêm ask pending, câu quay về new như cũ", async () => {
+    await store.recordUnanswered({ ...base, ask: ask("m1", "zgr-a", "u1", "Người A") });
+    db.docs.set("unanswered/abc", { ...db.docs.get("unanswered/abc")!, status: "answered", pending_ask_count: 0 });
+    await store.recordUnanswered({ ...base, ask: ask("m2", "zgr-a", "u2", "Người B") });
+    expect(db.docs.get("unanswered/abc")).toMatchObject({ status: "new", pending_ask_count: 1, count: 2 });
+  });
+
+  it("câu hỏi cắt còn 500 ký tự; tin ảnh ghi source; không có ask thì pending_ask_count = 0", async () => {
+    await store.recordUnanswered({ ...base, ask: ask("m1", "zgr-a", "u1", "A", "ệ".repeat(600)) });
+    expect(Array.from(db.docs.get("unanswered/abc/asks/m1")?.question as string)).toHaveLength(500);
+    await store.recordUnanswered({
+      ...base,
+      id: "img_m9",
+      clusterKey: "",
+      sample: "[Ảnh] x",
+      source: "image",
+      imageSummary: "x",
+      ask: ask("m9", "zgr-a", "u1", "A", ""),
+    });
+    expect(db.docs.get("unanswered/img_m9/asks/m9")).toMatchObject({ source: "image", question: "" });
+    await store.recordUnanswered({ ...base, id: "noask" });
+    expect(db.docs.get("unanswered/noask")?.pending_ask_count).toBe(0);
   });
 });

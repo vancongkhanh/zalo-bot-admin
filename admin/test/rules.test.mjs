@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { assertFails, assertSucceeds, initializeTestEnvironment } from "@firebase/rules-unit-testing";
 import {
-  collection, deleteDoc, doc, getDoc, getDocs, limit, orderBy, query, serverTimestamp, setDoc, updateDoc, where,
+  collection, collectionGroup, deleteDoc, doc, getDoc, getDocs, limit, orderBy, query, serverTimestamp, setDoc, updateDoc, where,
   writeBatch, Timestamp, or, and,
 } from "firebase/firestore";
 import { deleteObject, getDownloadURL, listAll, ref as sref, uploadBytes } from "firebase/storage";
@@ -407,6 +407,13 @@ describe("bước G: lịch sử hỗ trợ và nhật ký xem thông tin cá nh
     await assertSucceeds(getDocs(q));
   });
 
+  it("Bước 6: admin lọc được tin admin_reply (cả theo nhóm); người ngoài thì không", async () => {
+    for (const chatId of [null, "nhom-1"]) {
+      await assertSucceeds(getDocs(historyQuery(admin(), { kind: "admin", since: Timestamp.fromMillis(0), chatId, pageSize: 50 })));
+    }
+    await assertFails(getDocs(historyQuery(outsider(), { kind: "admin", since: Timestamp.fromMillis(0), chatId: null, pageSize: 50 })));
+  });
+
   it("người ngoài và chưa đăng nhập không truy vấn được lịch sử", async () => {
     for (const db of [outsider(), anon()]) {
       const q = historyQuery(db, { kind: "answered", since: Timestamp.fromMillis(0), chatId: null, pageSize: 50 });
@@ -450,5 +457,61 @@ describe("bước G: lịch sử hỗ trợ và nhật ký xem thông tin cá nh
     expect(data.image_text_enabled).toBe(false);
     await assertSucceeds(updateDoc(ref, { ...data, ...stamp }));
     await assertFails(updateDoc(ref, { image_text_enabled: "false", ...stamp }));
+  });
+});
+
+describe("trả lời người hỏi, bước 4: asks và admin_replies chỉ admin đọc, client không ghi", () => {
+  const ASK = {
+    chat_id: "g1", chat_type: "GROUP", from_id: "u1", display_name: "Người X", question: "Nộp thuế?",
+    message_id: "m1", reply_status: "pending", replied_at: null, reply_error: null, reply_batch_id: null,
+  };
+  beforeEach(async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      await setDoc(doc(db, "unanswered", "u1"), { cluster_key: "nop thue", count: 1, status: "new", pending_ask_count: 1 });
+      await setDoc(doc(db, "unanswered", "u1", "asks", "m1"), { ...ASK, asked_at: Timestamp.now() });
+      await setDoc(doc(db, "admin_replies", "b1"), { unanswered_id: "u1", answer_text: "x", results: [] });
+    });
+  });
+
+  it("admin đọc được ask, danh sách ask, truy vấn collectionGroup và admin_replies", async () => {
+    const db = admin();
+    await assertSucceeds(getDoc(doc(db, "unanswered", "u1", "asks", "m1")));
+    expect((await assertSucceeds(getDocs(collection(db, "unanswered", "u1", "asks")))).size).toBe(1);
+    const q = query(collectionGroup(db, "asks"), where("reply_status", "==", "pending"));
+    expect((await assertSucceeds(getDocs(q))).size).toBe(1);
+    await assertSucceeds(getDoc(doc(db, "admin_replies", "b1")));
+    await assertSucceeds(getDocs(collection(db, "admin_replies")));
+  });
+
+  it("người ngoài và chưa đăng nhập không đọc được", async () => {
+    for (const db of [outsider(), anon()]) {
+      await assertFails(getDoc(doc(db, "unanswered", "u1", "asks", "m1")));
+      await assertFails(getDocs(collection(db, "unanswered", "u1", "asks")));
+      await assertFails(getDocs(collectionGroup(db, "asks")));
+      await assertFails(getDoc(doc(db, "admin_replies", "b1")));
+    }
+  });
+
+  it("kể cả admin cũng không tạo, sửa, xóa ask hay admin_replies", async () => {
+    const db = admin();
+    const askRef = doc(db, "unanswered", "u1", "asks", "m1");
+    await assertFails(setDoc(doc(db, "unanswered", "u1", "asks", "m2"), ASK));
+    await assertFails(updateDoc(askRef, { reply_status: "sent" }));
+    await assertFails(updateDoc(askRef, { chat_id: "nhom-khac" }));
+    await assertFails(deleteDoc(askRef));
+    await assertFails(setDoc(doc(db, "admin_replies", "b2"), { unanswered_id: "u1" }));
+    await assertFails(updateDoc(doc(db, "admin_replies", "b1"), { answer_text: "y" }));
+    await assertFails(deleteDoc(doc(db, "admin_replies", "b1")));
+    await assertFails(setDoc(doc(outsider(), "unanswered", "u1", "asks", "m3"), ASK));
+  });
+
+  it("trang không sửa được pending_ask_count; luồng duyệt/bỏ qua cũ vẫn chạy (A12, A13)", async () => {
+    const ref = doc(admin(), "unanswered", "u1");
+    await assertFails(updateDoc(ref, { pending_ask_count: 0 }));
+    await assertFails(updateDoc(ref, { status: "ignored", handled_by: ADMIN.email, pending_ask_count: 0 }));
+    await assertSucceeds(updateDoc(ref, {
+      status: "answered", answered_slug: "ky-so", answered_at: serverTimestamp(), handled_by: ADMIN.email,
+    }));
   });
 });

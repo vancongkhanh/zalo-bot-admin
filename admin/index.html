@@ -107,6 +107,7 @@
   .chip.st-warn { background: var(--warn-bg); color: var(--warn); }
   .chip.st-bad { background: var(--bad-bg); color: var(--bad); }
   .chip.st-muted { color: var(--muted); }
+  .chip.st-admin { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
   .histd { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 6px; }
   .histd h4 { margin: 10px 0 4px; font-size: 14px; }
   .kv { display: grid; grid-template-columns: 130px 1fr; gap: 8px; font-size: 14px; overflow-wrap: anywhere; }
@@ -811,7 +812,10 @@ const HISTORY_KINDS = [
   ["handoff", "Chuyển ca"],
   ["error", "Lỗi"],
   ["silent", "Bot không trả lời"],
+  ["admin", "Admin trả lời"],
 ];
+/** Kết quả có gọi tên bot, cộng tin admin gửi từ trang quản trị (Trả lời người hỏi). */
+const HISTORY_OUTCOMES = ["answered", "replied", "handoff", "error", "admin_reply"];
 const HISTORY_RANGES = [
   ["today", "Hôm nay"],
   ["7", "7 ngày"],
@@ -831,7 +835,8 @@ function historyClauses(kind) {
   if (kind === "handoff") return [handoff];
   if (kind === "error") return [["outcome", ["error"]], ["send_ok", [false]]];
   if (kind === "silent") return [silent];
-  return [["outcome", ["answered", "replied", "handoff", "error"]], silent];
+  if (kind === "admin") return [["outcome", ["admin_reply"]]];
+  return [["outcome", HISTORY_OUTCOMES], silent];
 }
 
 /** Mốc bắt đầu: "today" là 0 giờ hôm nay giờ Việt Nam; số là n ngày gần nhất (gồm hôm nay). */
@@ -845,11 +850,23 @@ function historySince(range, now = new Date()) {
 function isHistoryRecord(c) {
   if (!c || typeof c !== "object") return false;
   if (c.outcome === "ignored") return SILENT_REASONS.includes(c.ignore_reason);
-  return ["answered", "replied", "handoff", "error"].includes(c.outcome);
+  return HISTORY_OUTCOMES.includes(c.outcome);
+}
+
+const isAdminReply = (c) => c?.outcome === "admin_reply";
+
+/** Tên hiện ở dòng Lịch sử: người nhắn, hoặc người được admin trả lời. */
+function historyPeople(c) {
+  if (isAdminReply(c)) {
+    const names = Array.isArray(c.reply_to_names) ? c.reply_to_names.filter((x) => typeof x === "string" && x) : [];
+    return names.length ? names.join(", ") : "(không tên)";
+  }
+  return c.display_name || "(không tên)";
 }
 
 /** Nhãn kết quả của một lần hỗ trợ. */
 function historyStatus(c) {
+  if (isAdminReply(c)) return { key: "admin", label: "Admin trả lời", cls: "admin" };
   if (c.outcome === "error" || c.send_ok === false) return { key: "error", label: "Lỗi gửi tin", cls: "bad" };
   if (c.outcome === "answered" || c.outcome === "replied") return { key: "answered", label: "Trả lời được", cls: "ok" };
   if (c.outcome === "handoff") return { key: "handoff", label: "Chuyển ca", cls: "warn" };
@@ -862,7 +879,7 @@ function matchesKind(c, kind) {
 }
 
 function historySummary(rows) {
-  const out = { total: 0, answered: 0, handoff: 0, error: 0, silent: 0, image: 0 };
+  const out = { total: 0, answered: 0, handoff: 0, error: 0, silent: 0, admin: 0, image: 0 };
   for (const c of rows) {
     out.total++;
     out[historyStatus(c).key]++;
@@ -879,7 +896,7 @@ function filterHistory(rows, q = "") {
   const needle = unaccent(q).trim();
   if (!needle) return rows;
   return rows.filter((c) =>
-    unaccent([c.display_name, maskPii(c.question), c.reply_text, c.image_summary, c.matched_slug].join("\n"))
+    unaccent([historyPeople(c), maskPii(c.question), c.reply_text, c.image_summary, c.matched_slug].join("\n"))
       .includes(needle));
 }
 
@@ -965,6 +982,163 @@ function formatBytes(n) {
   if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
+
+// ---------- Trả lời người hỏi (docs/spec-tra-loi-nguoi-hoi.md, mục 5.2 và 6) ----------
+const REPLY_MAX_TEXT = 2000;
+const REPLY_MAX_NAMES = 5;
+const REPLY_MAX_QUOTE_CHARS = 200;
+const REPLY_FALLBACK_NAME = "bạn";
+/** Ask quá 72 giờ: cảnh báo, mặc định bỏ chọn. */
+const ASK_OLD_MS = 72 * 3600 * 1000;
+/** Ask còn chờ trả lời: chưa gửi lần nào hoặc lần gửi trước lỗi. */
+const ASK_OPEN_STATUSES = ["pending", "failed"];
+
+/*
+ * BẢN CHÉP của functions/src/replyMessage.ts (formatAskTime, quoteText, buildReplyMessage).
+ * Sửa một bên thì sửa cả bên kia; cả hai chạy bộ mẫu functions/test/fixtures/reply-message.json,
+ * để xem trước khớp 100% tin gửi đi.
+ */
+function replyFormatTime(ms) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: TIMEZONE, hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit", hourCycle: "h23",
+  }).formatToParts(new Date(ms));
+  const p = (t) => parts.find((x) => x.type === t)?.value ?? "";
+  return `${p("hour")}:${p("minute")} ${p("day")}/${p("month")}`;
+}
+
+function replyQuote(ask) {
+  const q = (ask.question ?? "").replace(/\s+/g, " ").trim();
+  if (!q) return ask.source === "image" ? "[Ảnh]" : "(không có nội dung)";
+  const chars = Array.from(q);
+  return chars.length <= REPLY_MAX_QUOTE_CHARS ? q : chars.slice(0, REPLY_MAX_QUOTE_CHARS).join("") + "…";
+}
+
+function buildReplyMessage(asks, answerText) {
+  const answer = (answerText ?? "").trim();
+  const sorted = asks
+    .map((a, i) => ({ a, i }))
+    .sort((x, y) => (x.a.askedAtMs ?? 0) - (y.a.askedAtMs ?? 0) || x.i - y.i)
+    .map((x) => x.a);
+  const latest = sorted[sorted.length - 1];
+  const names = [];
+  const seen = new Set();
+  for (const a of sorted) {
+    const name = (a.displayName ?? "").trim() || REPLY_FALLBACK_NAME;
+    const key = a.fromId ? `id:${a.fromId}` : `name:${name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    names.push(name);
+  }
+  let header;
+  if (names.length <= 1) {
+    const at = latest && typeof latest.askedAtMs === "number" ? ` (${replyFormatTime(latest.askedAtMs)})` : "";
+    header = `📌 Trả lời câu hỏi của ${names[0] ?? REPLY_FALLBACK_NAME}${at}:`;
+  } else {
+    const shown = names.slice(0, REPLY_MAX_NAMES).join(", ");
+    const more = names.length > REPLY_MAX_NAMES ? ` và ${names.length - REPLY_MAX_NAMES} người khác` : "";
+    header = `📌 Trả lời câu hỏi của ${shown}${more}:`;
+  }
+  const quote = latest ? `"${replyQuote(latest)}"` : "";
+  return `${header}\n${quote}\n\n${answer}`;
+}
+/* Hết bản chép. */
+
+/** Tài liệu `unanswered/{id}/asks/{askId}` → dạng dùng cho trang. `asked_at` là Timestamp (có toMillis). */
+function askFromDoc(id, d) {
+  const s = (v) => (typeof v === "string" ? v : null);
+  const ms = d?.asked_at && typeof d.asked_at.toMillis === "function" ? d.asked_at.toMillis() : null;
+  return {
+    id,
+    chatId: s(d?.chat_id) || null,
+    chatType: s(d?.chat_type),
+    fromId: s(d?.from_id),
+    displayName: s(d?.display_name),
+    question: s(d?.question) ?? "",
+    askedAtMs: ms,
+    source: s(d?.source),
+    status: s(d?.reply_status) ?? "pending",
+    error: s(d?.reply_error),
+  };
+}
+
+/** "zgr-ABCDEF…1234" cho mã dài. */
+function shortChatId(id) {
+  const s = String(id ?? "");
+  return s.length > 14 ? `${s.slice(0, 8)}…${s.slice(-4)}` : s;
+}
+
+/** Tên hiển thị của nhóm/chat: nhãn ở Cài đặt, không có thì "Chat riêng" hoặc mã rút gọn. */
+function chatDisplayName(chatId, chatType, labels = {}) {
+  if (!chatId) return "(không có mã nhóm)";
+  if (labels[chatId]) return labels[chatId];
+  if (chatType && chatType !== "GROUP") return "Chat riêng";
+  return `Nhóm ${shortChatId(chatId)}`;
+}
+
+/** "N người hỏi · M nhóm" cho các ask còn chờ. Người tính theo from_id (thiếu thì theo tên). */
+function askSummary(asks) {
+  const open = asks.filter((a) => ASK_OPEN_STATUSES.includes(a.status));
+  const people = new Set(open.map((a) => (a.fromId ? `id:${a.fromId}` : `name:${a.displayName ?? ""}`)));
+  const chats = new Set(open.map((a) => a.chatId ?? `x:${a.id}`));
+  return { asks: open.length, people: people.size, chats: chats.size };
+}
+
+/** Cảnh báo cho một ask và có chọn sẵn hay không (mục 6.2). */
+function askFlags(ask, { nowMs, allowedChatIds = [] }) {
+  const ageMs = typeof ask.askedAtMs === "number" ? nowMs - ask.askedAtMs : null;
+  const oldDays = ageMs !== null && ageMs > ASK_OLD_MS ? Math.floor(ageMs / 86400000) : null;
+  const notAllowed = !!ask.chatId && (!ask.chatType || ask.chatType === "GROUP") && !allowedChatIds.includes(ask.chatId);
+  const noChat = !ask.chatId;
+  return { oldDays, notAllowed, noChat, preselect: oldDays === null && !notAllowed && !noChat };
+}
+
+/** Gom ask theo chat_id, giữ thứ tự lượt hỏi đầu tiên của mỗi nhóm. Ask thiếu chat_id: mỗi ask một nhóm. */
+function groupAsksByChat(asks) {
+  const sorted = [...asks].sort((a, b) => (a.askedAtMs ?? 0) - (b.askedAtMs ?? 0));
+  const groups = new Map();
+  for (const a of sorted) {
+    const key = a.chatId ? `c:${a.chatId}` : `x:${a.id}`;
+    if (!groups.has(key)) groups.set(key, { chatId: a.chatId, chatType: a.chatType, asks: [] });
+    groups.get(key).asks.push(a);
+  }
+  return [...groups.values()];
+}
+
+/** Tin sẽ gửi cho từng nhóm, độ dài tin dài nhất, có vượt 2.000 ký tự không. */
+function replyPlan(selectedAsks, answerText) {
+  const groups = groupAsksByChat(selectedAsks).map((g) => {
+    const text = buildReplyMessage(g.asks, answerText);
+    return { ...g, text, length: charLength(text) };
+  });
+  const maxLength = groups.reduce((m, g) => Math.max(m, g.length), 0);
+  return { groups, maxLength, over: maxLength > REPLY_MAX_TEXT, sendable: groups.filter((g) => g.chatId).length };
+}
+
+/** Phần gửi đi mặc định khi có mục kho: nội dung trả lời và các link, như bot gửi (không gồm ảnh). */
+function defaultReplyAnswer(item) {
+  const answer = cleanText(item?.answer);
+  const links = (Array.isArray(item?.links) ? item.links : [])
+    .filter((l) => l && typeof l.url === "string" && l.url.startsWith("https://"))
+    .map((l) => `${cleanText(l.label) || "Liên kết"}: ${l.url}`);
+  return links.length ? `${answer}\n\n${links.join("\n")}` : answer;
+}
+
+/** Nhãn trạng thái của một nhóm trong kết quả gửi. */
+const REPLY_ERROR_LABELS = {
+  MISSING_CHAT_ID: "Thiếu mã nhóm",
+  TEXT_TOO_LONG: "Tin quá 2.000 ký tự",
+  QUOTA_EXCEEDED: "Đã hết hạn mức tin trong tháng",
+  INTERNAL: "Lỗi hệ thống, chưa gửi",
+  UNKNOWN_STATE: "Không rõ đã gửi chưa (chờ 15 phút rồi kiểm tra trong nhóm trước khi gửi lại)",
+  ALREADY_SENT: "Đã gửi trước đó",
+  ALREADY_SKIPPED: "Đã bỏ qua trước đó",
+  IN_PROGRESS: "Đang được gửi ở lần bấm khác",
+};
+function replyResultLabel(r) {
+  if (r.status === "sent") return { icon: "✅", text: "Đã gửi", cls: "ok" };
+  if (r.status === "skipped") return { icon: "⏭", text: REPLY_ERROR_LABELS[r.error] ?? "Bỏ qua", cls: "muted" };
+  return { icon: "❌", text: `Lỗi: ${REPLY_ERROR_LABELS[r.error] ?? r.error ?? "không rõ"}`, cls: "bad" };
+}
 /* LOGIC-END */
 
 // =====================================================================
@@ -986,7 +1160,7 @@ const {
   connectAuthEmulator,
 } = authMod;
 const {
-  getFirestore, connectFirestoreEmulator, collection, doc, getDoc, getDocs, query, where, orderBy, limit,
+  getFirestore, connectFirestoreEmulator, collection, collectionGroup, doc, getDoc, getDocs, query, where, orderBy, limit,
   documentId, serverTimestamp, runTransaction, writeBatch, updateDoc, or, and, startAfter, addDoc,
 } = fsMod;
 
@@ -1113,6 +1287,37 @@ const suggestCall = emulator
     return { data: { questions: [`${title} thế nào`, `cách ${title.toLowerCase()}`, `${unaccent(title)} o dau`] } };
   }
   : httpsCallable(getFunctions(app, "asia-southeast1"), "suggestQuestions", { timeout: 70000 });
+
+// Trả lời người hỏi: hai hàm sendReplyToAskers, skipAsks. Emulator không chạy hàm: giả lập kết quả
+// (không ghi gì, trạng thái ask không đổi; nhóm có chữ "loi" trong mã giả lập lỗi Zalo).
+const sendReplyCall = emulator
+  ? async ({ unansweredId, answerText, askIds }) => {
+    await new Promise((r) => setTimeout(r, 600));
+    const snaps = await Promise.all(askIds.map((id) => getDoc(doc(db, "unanswered", unansweredId, "asks", id))));
+    const asks = snaps.filter((s) => s.exists()).map((s) => askFromDoc(s.id, s.data()));
+    const results = groupAsksByChat(asks).map((g) => {
+      const text = g.chatId ? buildReplyMessage(g.asks, answerText) : null;
+      const error = !g.chatId ? "MISSING_CHAT_ID" : charLength(text) > REPLY_MAX_TEXT ? "TEXT_TOO_LONG"
+        : g.chatId.includes("loi") ? "api_error[-201]: sendMessage: bot not in group (giả lập)" : null;
+      return { chat_id: g.chatId, chat_name: null, ask_ids: g.asks.map((a) => a.id), ask_count: g.asks.length,
+        status: error ? "failed" : "sent", error, text };
+    });
+    return { data: { batchId: "emulator", results } };
+  }
+  : httpsCallable(getFunctions(app, "asia-southeast1"), "sendReplyToAskers", { timeout: 560000 });
+const skipAsksCall = emulator
+  ? async ({ askIds }) => ({ data: { skipped: askIds, unchanged: [] } })
+  : httpsCallable(getFunctions(app, "asia-southeast1"), "skipAsks", { timeout: 35000 });
+
+/** Lỗi khi gọi hàm (callable) → câu tiếng Việt. */
+function fnErrText(e, fnName) {
+  const code = e?.code ?? "";
+  if (code === "functions/permission-denied" || code === "functions/unauthenticated") return "Tài khoản chưa có quyền quản trị.";
+  if (code === "functions/not-found" && !e?.message?.includes("không")) return `Chưa gọi được hàm ${fnName} (đã triển khai hàm chưa?).`;
+  if (code === "functions/internal") return `Hàm ${fnName} gặp lỗi. Xem nhật ký hàm.`;
+  if (code === "functions/deadline-exceeded") return "Quá thời gian chờ. Hàm có thể vẫn đang gửi: tải lại trang để xem trạng thái trước khi gửi lại.";
+  return e?.message ? String(e.message) : String(e);
+}
 
 const state = { user: null, tab: "stats", kb: new Map(), maxImages: BOT_DEFAULTS.max_images_per_answer };
 
@@ -1350,7 +1555,7 @@ function drawHistory(notice) {
     const t = historySummary(rows);
     summaryBox.textContent = `${fmtNum.format(t.total)} lần hỗ trợ${hist.done ? "" : " (đã tải " +
       fmtNum.format(hist.rows.length) + ", còn nữa)"}: ${t.answered} trả lời được, ${t.handoff} chuyển ca, ` +
-      `${t.error} lỗi, ${t.silent} bot không trả lời; ${t.image} tin ảnh.`;
+      `${t.error} lỗi, ${t.silent} bot không trả lời, ${t.admin} admin trả lời; ${t.image} tin ảnh.`;
     const slice = pageSlice(rows, hist.page, hist.size);
     hist.page = slice.page;
     listBox.replaceChildren(...nodes(
@@ -1406,6 +1611,7 @@ function historyCard(c) {
   const revealed = hist.revealed.has(c.id);
   const item = c.matched_slug ? state.kb.get(c.matched_slug) : null;
   const isImage = c.source === "image";
+  const admin = isAdminReply(c);
   const piiHere = hasPii(c.question, c.image_text);
   const photo = isImage ? safePhotoUrl(c.photo_url) : null;
   const openLabel = revealLabel(!!photo, piiHere);
@@ -1448,7 +1654,7 @@ function historyCard(c) {
       isImage ? h("span", { class: "chip", title: "Người dùng gửi ảnh" }, "Ảnh") : null,
       h("span", { class: "muted" }, when(c.created_at)),
       h("span", { class: "muted" }, hist.labels[c.chat_id] ?? "Nhóm khác"),
-      h("span", { class: "muted" }, c.display_name || "(không tên)"),
+      h("span", { class: "muted" }, admin ? `Trả lời: ${historyPeople(c)}` : historyPeople(c)),
       h("span", { class: "muted", style: "margin-left:auto" }, isOpen ? "Thu gọn ▴" : "Chi tiết ▾"),
     ),
     h("p", { class: "sample", style: "margin:6px 0 0" },
@@ -1464,7 +1670,7 @@ function historyCard(c) {
         revealed
           ? h("button", { class: "btn", onclick: hide }, photo ? "Ẩn lại" : "Ẩn thông tin cá nhân")
           : h("button", { class: "btn", onclick: reveal }, openLabel)) : null,
-      h("section", {},
+      admin ? null : h("section", {},
         h("h4", {}, "Người dùng đã nhắn"),
         meta("Người gửi", c.display_name || "(không tên)"),
         meta("Nhóm", hist.labels[c.chat_id] ?? "Nhóm khác"),
@@ -1483,7 +1689,25 @@ function historyCard(c) {
             ? "Bot không tải được ảnh nên không đọc được."
             : "Không có chữ đọc từ ảnh (ảnh gửi trước bước G, đang tắt chép chữ, hoặc ảnh không có chữ)."),
       ) : null,
-      h("section", {},
+      admin ? h("section", {},
+        h("h4", {}, "Câu hỏi được trả lời"),
+        meta("Người hỏi", historyPeople(c)),
+        meta("Nhóm", hist.labels[c.chat_id] ?? "Nhóm khác"),
+        meta("Số lượt hỏi", Array.isArray(c.ask_ids) ? String(c.ask_ids.length) : null),
+        h("div", { class: "quote" }, c.question ? piiText(c.question, revealed) : h("span", { class: "muted" }, "(trống)")),
+      ) : null,
+      admin ? h("section", {},
+        h("h4", {}, "Admin đã gửi"),
+        meta("Kết quả", "Đã gửi vào nhóm"),
+        meta("Người gửi", c.sent_by || "(không rõ)"),
+        meta("Thời gian", when(c.created_at)),
+        meta("Mục kho", item || c.matched_slug ? `${item?.title ?? "(mục đã xóa)"} (${c.matched_slug})` : null),
+        h("div", { class: "quote" }, c.reply_text || ""),
+        item ? h("div", { class: "actions" },
+          h("button", { class: "btn", onclick: () => itemEditor({
+            slug: c.matched_slug, form: itemToForm(c.matched_slug, item), onDone: () => go("history"),
+          }) }, "Mở mục")) : null,
+      ) : h("section", {},
         h("h4", {}, "Bot đã hỗ trợ"),
         meta("Kết quả", st.label),
         meta("Mục đã chọn", item || c.matched_slug ? `${item?.title ?? "(mục đã xóa)"} (${c.matched_slug})` : null),
@@ -1555,23 +1779,100 @@ function piiViewsCard() {
 }
 
 // ---------- Màn: Câu chưa trả lời ----------
+/** Nhóm cho phép, nhãn nhóm và các ask còn chờ (theo unanswered id) cho tab Câu chưa trả lời. */
+const reply = { labels: {}, allowed: [], asksByU: new Map(), error: null };
+
+async function loadReplyContext() {
+  const [cfg, asksSnap] = await Promise.all([
+    getDoc(doc(db, "config", "main")).catch(() => null),
+    // Một truy vấn cho mọi thẻ. Lỗi (Rules/chỉ mục chưa triển khai) thì vẫn hiện tab như cũ.
+    getDocs(query(collectionGroup(db, "asks"), where("reply_status", "in", ASK_OPEN_STATUSES), limit(1000)))
+      .catch((e) => ((reply.error = e), null)),
+  ]);
+  const raw = cfg?.exists() ? cfg.data() : {};
+  reply.labels = raw.chat_labels && typeof raw.chat_labels === "object" ? raw.chat_labels : {};
+  reply.allowed = Array.isArray(raw.allowed_chat_ids) ? raw.allowed_chat_ids.filter((x) => typeof x === "string") : [];
+  reply.asksByU = new Map();
+  if (asksSnap) {
+    reply.error = null;
+    for (const d of asksSnap.docs) {
+      const uid = d.ref.parent.parent?.id;
+      if (!uid) continue;
+      if (!reply.asksByU.has(uid)) reply.asksByU.set(uid, []);
+      reply.asksByU.get(uid).push(askFromDoc(d.id, d.data()));
+    }
+  }
+}
+
 async function renderUnanswered(notice) {
-  const [snap] = await Promise.all([
+  const [snap, waitingSnap] = await Promise.all([
     getDocs(query(collection(db, "unanswered"), where("status", "==", "new"),
       orderBy("count", "desc"), orderBy("last_asked_at", "desc"), limit(100))),
+    // Mục 6.4: câu đã có đáp án nhưng còn người chưa được trả lời.
+    getDocs(query(collection(db, "unanswered"), where("status", "==", "answered"), where("pending_ask_count", ">", 0),
+      orderBy("pending_ask_count", "desc"), limit(50))).catch((e) => (console.error(e), null)),
     loadKb(),
+    loadReplyContext(),
   ]);
   const cards = snap.docs.map((d) => unansweredCard(d.id, d.data()));
+  const waiting = (waitingSnap?.docs ?? [])
+    .map((d) => ({ id: d.id, u: d.data(), asks: reply.asksByU.get(d.id) ?? [] }))
+    .filter((x) => x.asks.length);
   show(
     notice ?? null,
+    reply.error ? msg("warn", `Chưa đọc được danh sách người hỏi (${errText(reply.error)}). Các nút cũ vẫn dùng được.`) : null,
     h("p", { class: "muted" },
       `${snap.size} câu đang chờ xử lý${snap.size === 100 ? " (hiện 100 câu hỏi nhiều nhất)" : ""}. `,
       "Câu đã có đáp án sẽ được bot dùng sau tối đa khoảng 1 phút khi mục ở trạng thái Đã duyệt."),
     cards.length ? cards : h("div", { class: "card center muted" }, "Không còn câu nào chưa trả lời."),
+    waiting.length
+      ? [h("h3", { style: "margin:20px 0 8px;font-size:16px" }, "Đã có đáp án, còn người chưa được trả lời"),
+        waiting.map((x) => waitingCard(x.id, x.u, x.asks))]
+      : null,
   );
 }
 
+/** Dòng "N người hỏi · M nhóm" (mục 6.1). Câu có từ trước khi có tính năng: không có pending_ask_count. */
+function askLine(u, asks) {
+  if (typeof u.pending_ask_count !== "number") {
+    return h("span", { class: "muted", title: "Câu hỏi có từ trước khi lưu người hỏi" }, "Không có thông tin người hỏi");
+  }
+  const s = askSummary(asks);
+  return s.asks ? h("span", { class: "chip" }, `${fmtNum.format(s.people)} người hỏi · ${fmtNum.format(s.chats)} nhóm`) : null;
+}
+
+/** Mục 6.4: câu đã duyệt mà còn ask chờ. */
+function waitingCard(id, u, asks) {
+  const item = u.answered_slug ? state.kb.get(u.answered_slug) : null;
+  const samples = (u.samples ?? []).filter((s) => typeof s === "string");
+  const n = askSummary(asks).people;
+  return h("div", { class: "card" },
+    samples.slice(0, 1).map((s) => h("p", { class: "sample" }, `“${s}”`)),
+    h("div", { class: "row muted", style: "margin-top:6px" },
+      h("span", { class: "chip st-warn" }, `Còn ${fmtNum.format(n)} người chưa được trả lời`),
+      askLine(u, asks),
+      h("span", {}, `Đáp án: ${item?.title ?? u.answered_slug ?? "-"}`),
+      item ? h("span", { class: `chip ${item.status}` }, STATUS_LABELS[item.status] ?? item.status) : null,
+    ),
+    h("div", { class: "actions" },
+      h("button", { class: "btn danger", onclick: () => skipRemaining(id, asks) }, `Bỏ qua ${asks.length} lượt hỏi`),
+      h("button", { class: "btn primary", onclick: () => sendOnlyDialog(id, u, asks) }, "Gửi trả lời"),
+    ),
+  );
+}
+
+async function skipRemaining(id, asks) {
+  if (!confirm(`Không gửi trả lời cho ${asks.length} lượt hỏi còn lại? Họ sẽ không nhận được tin.`)) return;
+  try {
+    await skipAsksCall({ unansweredId: id, askIds: asks.map((a) => a.id) });
+    await renderUnanswered(msg("ok", emulator ? "Đã bỏ qua (giả lập, emulator không đổi dữ liệu)." : "Đã bỏ qua."));
+  } catch (e) {
+    alert(fnErrText(e, "skipAsks"));
+  }
+}
+
 function unansweredCard(id, u) {
+  const asks = reply.asksByU.get(id) ?? [];
   const shown = (u.samples ?? []).filter((s) => typeof s === "string");
   // Bỏ tiền tố "[Ảnh] " khi dùng mẫu làm cách hỏi.
   const samples = [...new Set(shown.map(stripImageTag).filter(Boolean))];
@@ -1586,6 +1887,7 @@ function unansweredCard(id, u) {
     h("div", { class: "row muted", style: "margin-top:6px" },
       isImage ? h("span", { class: "chip", title: "Người dùng gửi ảnh; ảnh không được lưu" }, "Ảnh") : null,
       h("span", { class: "chip" }, `Hỏi ${fmtNum.format(u.count ?? 0)} lần`),
+      askLine(u, asks),
       h("span", {}, `Lần cuối: ${when(u.last_asked_at)}`),
       h("span", {}, `Lý do: ${REASON_LABELS[u.reason] ?? u.reason ?? "-"}`),
     ),
@@ -1596,8 +1898,8 @@ function unansweredCard(id, u) {
       : null,
     h("div", { class: "actions" },
       h("button", { class: "btn danger", onclick: () => ignoreUnanswered(id) }, "Bỏ qua"),
-      h("button", { class: "btn", onclick: () => attachDialog(id, u, samples) }, "Gắn vào mục có sẵn"),
-      h("button", { class: "btn primary", onclick: () => newFromUnanswered(id, samples) }, "Soạn đáp án mới"),
+      h("button", { class: "btn", onclick: () => attachDialog(id, u, samples, asks) }, "Gắn vào mục có sẵn"),
+      h("button", { class: "btn primary", onclick: () => newFromUnanswered(id, samples, asks) }, "Soạn đáp án mới"),
     ),
   );
 }
@@ -1612,7 +1914,7 @@ async function ignoreUnanswered(id) {
   }
 }
 
-function newFromUnanswered(id, samples) {
+function newFromUnanswered(id, samples, asks = []) {
   const title = (samples[0] ?? "").slice(0, 200);
   const form = { ...itemToForm("", null), slug: suggestSlug(title), title, questions: samples.join("\n") };
   itemEditor({
@@ -1620,11 +1922,191 @@ function newFromUnanswered(id, samples) {
     form,
     heading: "Soạn đáp án mới từ câu chưa trả lời",
     unansweredId: id,
+    replyAsks: asks,
     onDone: () => renderUnanswered(msg("ok", "Đã lưu mục mới và đánh dấu câu là đã có đáp án.")),
   });
 }
 
-function attachDialog(id, u, samples) {
+// ---------- Khối "Gửi trả lời cho người đã hỏi" (mục 6.2) ----------
+/**
+ * asks: ask còn chờ của câu. defaultAnswer(): phần gửi đi lấy từ đáp án (theo dõi tới khi người dùng tự sửa).
+ * blocked(): lý do chưa gửi được (ví dụ mục chưa Đã duyệt) hoặc null. onChange(): báo form chính cập nhật nút.
+ */
+function replyBlock({ asks, defaultAnswer, blocked = () => null, onChange = () => {} }) {
+  const nowMs = Date.now();
+  const rows = groupAsksByChat(asks).flatMap((g) => g.asks).map((a) => {
+    const flags = askFlags(a, { nowMs, allowedChatIds: reply.allowed });
+    const box = h("input", { type: "checkbox", checked: flags.preselect });
+    box.addEventListener("change", () => refresh());
+    return { ask: a, flags, box };
+  });
+  const enable = h("input", { type: "checkbox", checked: rows.length > 0 });
+  enable.addEventListener("change", () => refresh());
+  const answerInput = h("textarea", { rows: 5 });
+  let touched = false;
+  answerInput.addEventListener("input", () => {
+    touched = true;
+    refresh();
+  });
+  const resetBtn = h("button", { class: "btn", type: "button", onclick: () => ((touched = false), refresh()) },
+    "Lấy lại từ đáp án");
+  const blockedBox = h("div");
+  const previews = h("div");
+  const counter = h("div", { class: "count" });
+  const body = h("div", {},
+    blockedBox,
+    h("p", { class: "muted", style: "margin:6px 0" },
+      "Tin gửi vào đúng nhóm/chat của từng người hỏi. Mỗi nhóm một tin, chỉ có tên người hỏi trong nhóm đó."),
+    rows.map(({ ask, flags, box }) => h("label", { class: "row", style: "margin:6px 0;flex-wrap:nowrap;align-items:flex-start" },
+      box,
+      h("div", { class: "grow" },
+        h("div", { class: "row" },
+          h("b", {}, ask.displayName || "(không có tên)"),
+          h("span", { class: "chip" }, chatDisplayName(ask.chatId, ask.chatType, reply.labels)),
+          h("span", { class: "muted" }, ask.askedAtMs ? fmtTime.format(new Date(ask.askedAtMs)) : ""),
+          flags.oldDays !== null ? h("span", { class: "chip st-warn" }, `Đã hỏi ${flags.oldDays} ngày trước`) : null,
+          flags.notAllowed ? h("span", { class: "chip st-bad" }, "Nhóm không còn trong cấu hình") : null,
+          flags.noChat ? h("span", { class: "chip st-bad" }, "Thiếu mã nhóm, không gửi được") : null,
+          ask.status === "failed" ? h("span", { class: "chip st-bad", title: ask.error ?? "" }, "Lần gửi trước lỗi") : null,
+        ),
+        h("div", { class: "sample muted" }, replyQuote(ask)),
+      ),
+    )),
+    h("label", { class: "f" }, "Nội dung gửi đi",
+      h("span", { class: "hint" }, " lấy từ đáp án; sửa ở đây chỉ đổi tin gửi đi, không đổi mục kho")),
+    answerInput,
+    h("div", { class: "row", style: "justify-content:space-between" }, resetBtn, counter),
+    h("label", { class: "f" }, "Xem trước", h("span", { class: "hint" }, " đúng tin sẽ gửi cho từng nhóm")),
+    previews,
+  );
+  const el = rows.length
+    ? h("div", { class: "card", style: "margin:12px 0" },
+      h("label", { class: "row", style: "font-weight:600" }, enable, "Gửi trả lời cho người đã hỏi"),
+      body)
+    : null;
+
+  function state_() {
+    const answerText = cleanText(answerInput.value);
+    const selected = rows.filter((r) => r.box.checked).map((r) => r.ask);
+    const plan = replyPlan(selected.filter((a) => a.chatId), answerText);
+    const reason = blocked();
+    const active = !!el && enable.checked && selected.length > 0 && !reason;
+    const valid = active && !!answerText && !plan.over && plan.sendable > 0;
+    return { active, valid, answerText, selected, plan, reason };
+  }
+
+  function refresh() {
+    if (!el) return;
+    if (!touched) answerInput.value = defaultAnswer() ?? "";
+    body.hidden = !enable.checked;
+    const s = state_();
+    blockedBox.replaceChildren(...nodes(s.reason ? msg("warn", s.reason) : null));
+    counter.textContent = `${fmtNum.format(s.plan.maxLength)}/${fmtNum.format(REPLY_MAX_TEXT)} ký tự (tin dài nhất)`;
+    counter.className = s.plan.over ? "count over" : "count";
+    previews.replaceChildren(...(s.plan.groups.length
+      ? s.plan.groups.map((g) => {
+        const where = g.chatType && g.chatType !== "GROUP"
+          ? `Chat riêng với ${g.asks[0].displayName || "(không có tên)"}`
+          : chatDisplayName(g.chatId, g.chatType, reply.labels);
+        return h("div", { style: "margin:8px 0" },
+          h("div", { class: "row" }, h("b", {}, `Gửi vào: ${where}`),
+            h("span", { class: g.length > REPLY_MAX_TEXT ? "count over" : "count" }, `${fmtNum.format(g.length)} ký tự`)),
+          h("div", { class: "quote" }, g.text));
+      })
+      : [h("p", { class: "muted" }, "Chưa chọn người hỏi nào.")]));
+    onChange();
+  }
+
+  return { el, refresh, state: state_, hasAsks: rows.length > 0 };
+}
+
+/** Gọi sendReplyToAskers và hiện kết quả từng nhóm trong hộp thoại; "Gửi lại" chỉ gửi các nhóm lỗi. */
+async function runSend({ unansweredId, answerText, askIds, kbItemId, asks, title, onClose }) {
+  const byChat = new Map(asks.map((a) => [a.chatId, a]));
+  const close = h("button", { class: "btn", onclick: () => (closeDialog(), onClose?.()) }, "Đóng");
+  close.disabled = true;
+  const chats = new Set(asks.filter((a) => askIds.includes(a.id)).map((a) => a.chatId ?? a.id)).size;
+  const box = h("div", {}, h("p", { class: "muted" }, `Đang gửi vào ${fmtNum.format(chats)} nhóm/chat… Không đóng trang.`));
+  openDialog(h("h2", {}, title ?? "Gửi trả lời cho người đã hỏi"), box, h("div", { class: "actions" }, close));
+  $dlg.oncancel = (e) => close.disabled && e.preventDefault(); // không cho Esc khi đang gửi
+  try {
+    const res = await sendReplyCall({ unansweredId, answerText, askIds, kbItemId: kbItemId ?? null });
+    const results = res.data?.results ?? [];
+    // Nhóm "không rõ đã gửi chưa" không gửi lại tự động (server cũng chặn tới khi quá hạn).
+    const retryGroups = results.filter((r) => r.status === "failed" && r.error !== "UNKNOWN_STATE");
+    const retryIds = retryGroups.flatMap((r) => r.ask_ids);
+    const sent = results.filter((r) => r.status === "sent").length;
+    box.replaceChildren(...nodes(
+      emulator ? msg("warn", "Emulator: kết quả giả lập, không gửi Zalo, trạng thái người hỏi không đổi.") : null,
+      msg(retryIds.length ? "warn" : "ok", `Đã gửi ${sent}/${results.length} nhóm.`),
+      results.map((r) => {
+        const lab = replyResultLabel(r);
+        const a = byChat.get(r.chat_id);
+        const where = r.chat_name ?? (a?.chatType && a.chatType !== "GROUP"
+          ? `Chat riêng với ${a.displayName || "(không có tên)"}` : chatDisplayName(r.chat_id, a?.chatType, reply.labels));
+        return h("div", { class: "row", style: "margin:6px 0;align-items:flex-start;flex-wrap:nowrap" },
+          h("span", {}, lab.icon),
+          h("div", { class: "grow" },
+            h("b", {}, where), h("span", { class: "muted" }, ` · ${r.ask_count} lượt hỏi`),
+            h("div", { class: lab.cls === "bad" ? "errs" : "muted", style: "padding:0" }, lab.text)));
+      }),
+      retryIds.length
+        ? h("div", { class: "actions" }, h("button", {
+          class: "btn primary",
+          onclick: () => runSend({ unansweredId, answerText, askIds: retryIds, kbItemId, asks, title: "Gửi lại các nhóm lỗi", onClose }),
+        }, `Gửi lại ${retryGroups.length} nhóm lỗi`))
+        : null,
+    ));
+  } catch (e) {
+    console.error(e);
+    box.replaceChildren(
+      msg("bad", `Chưa gửi được: ${fnErrText(e, "sendReplyToAskers")}`),
+      h("div", { class: "actions" }, h("button", {
+        class: "btn primary",
+        onclick: () => runSend({ unansweredId, answerText, askIds, kbItemId, asks, title, onClose }),
+      }, "Thử lại")),
+    );
+  } finally {
+    close.disabled = false;
+    $dlg.oncancel = null;
+  }
+}
+
+/** Mục 6.4: gửi bằng đáp án đã duyệt, không sửa kho. */
+function sendOnlyDialog(id, u, asks) {
+  const item = u.answered_slug ? state.kb.get(u.answered_slug) : null;
+  const sendBtn = h("button", { class: "btn primary" }, "Gửi");
+  const errBox = h("div");
+  const block = replyBlock({
+    asks,
+    defaultAnswer: () => defaultReplyAnswer(item),
+    blocked: () => !item ? "Mục đáp án không còn trong kho."
+      : item.status !== "approved" ? "Mục đáp án chưa ở trạng thái Đã duyệt: duyệt mục trước khi gửi." : null,
+    onChange: () => {
+      const s = block?.state();
+      if (!s) return;
+      sendBtn.disabled = !s.valid;
+      sendBtn.textContent = s.active ? `Gửi (${s.plan.sendable} nhóm)` : "Gửi";
+    },
+  });
+  sendBtn.addEventListener("click", () => {
+    const s = block.state();
+    if (!s.valid) return;
+    if (!confirm(`Gửi trả lời vào ${s.plan.sendable} nhóm/chat?`)) return;
+    sendBtn.disabled = true;
+    runSend({ unansweredId: id, answerText: s.answerText, askIds: s.selected.map((a) => a.id), kbItemId: u.answered_slug,
+      asks, onClose: () => renderUnanswered() });
+  });
+  openDialog(
+    h("h2", {}, "Gửi trả lời"),
+    h("p", { class: "muted" }, `Đáp án: ${item?.title ?? u.answered_slug ?? "-"}`),
+    block.el, errBox,
+    h("div", { class: "actions" }, h("button", { class: "btn", onclick: closeDialog }, "Hủy"), sendBtn),
+  );
+  block.refresh();
+}
+
+function attachDialog(id, u, samples, asks = []) {
   const entries = [...state.kb.entries()].filter(([, d]) => d.status !== "hidden")
     .sort(([a, x], [b, y]) => (x.title ?? a).localeCompare(y.title ?? b, "vi"));
   if (!entries.length) return alert("Kho chưa có mục nào để gắn.");
@@ -1637,15 +2119,28 @@ function attachDialog(id, u, samples) {
     "Mục này đang được bot dùng. Tôi xác nhận thêm cách hỏi (bot sẽ dùng mục cho các câu này).");
   const info = h("p", { class: "muted" });
   const errBox = h("div");
+  const saveBtn = h("button", { class: "btn primary" }, "Lưu");
+  // Mục 6.2: answerText = nội dung mục được chọn; sửa phần gửi đi không đổi mục kho (A10).
+  const block = replyBlock({
+    asks,
+    defaultAnswer: () => defaultReplyAnswer(state.kb.get(pick.value)),
+    blocked: () => (state.kb.get(pick.value)?.status !== "approved"
+      ? "Chỉ gửi được khi mục được chọn ở trạng thái Đã duyệt." : null),
+    onChange: () => {
+      const s = block?.state();
+      saveBtn.disabled = !!s?.active && !s.valid;
+      saveBtn.textContent = s?.active ? `Duyệt & gửi (${s.plan.sendable} nhóm)` : "Lưu";
+    },
+  });
   const refresh = () => {
     const d = state.kb.get(pick.value);
     confirmRow.hidden = d?.status !== "approved";
     info.textContent = d?.status === "approved"
       ? `Mục đã duyệt, hiện có ${d.questions?.length ?? 0} cách hỏi.`
       : `Mục đang ở trạng thái ${STATUS_LABELS[d?.status] ?? d?.status}: bot chưa dùng cho tới khi bạn duyệt.`;
+    block.refresh();
   };
   pick.addEventListener("change", refresh);
-  refresh();
   const save = async () => {
     const slug = pick.value;
     const old = state.kb.get(slug);
@@ -1657,13 +2152,27 @@ function attachDialog(id, u, samples) {
     }
     const questions = mergeQuestions(old.questions, added);
     if (questions.length > MAX_QUESTIONS) return errBox.replaceChildren(msg("bad", `Mục đã đủ ${MAX_QUESTIONS} cách hỏi.`));
+    const send = block.state();
+    if (send.active) {
+      if (!send.valid) return;
+      if (!confirm(`Gửi trả lời vào ${send.plan.sendable} nhóm/chat?`)) return;
+    }
+    saveBtn.disabled = true;
     try {
       await saveItem(slug, old, { ...pickContent(old), questions, status: old.status }, id);
-      closeDialog();
-      await renderUnanswered(msg("ok", `Đã gắn vào mục "${old.title ?? slug}".`));
     } catch (e) {
       errBox.replaceChildren(msg("bad", errText(e)));
+      saveBtn.disabled = false;
+      return;
     }
+    const done = () => renderUnanswered(msg("ok", `Đã gắn vào mục "${old.title ?? slug}".`));
+    if (send.active) {
+      await runSend({ unansweredId: id, answerText: send.answerText, askIds: send.selected.map((a) => a.id),
+        kbItemId: slug, asks, title: "Đã gắn đáp án. Gửi trả lời cho người đã hỏi", onClose: done });
+      return;
+    }
+    closeDialog();
+    await done();
   };
   openDialog(
     h("h2", {}, "Gắn vào mục có sẵn"),
@@ -1674,12 +2183,15 @@ function attachDialog(id, u, samples) {
     h("label", { class: "f" }, "Câu thêm vào"),
     samples.map((s, i) => h("label", { class: "row", style: "margin:4px 0" }, boxes[i], h("span", { class: "sample grow" }, s))),
     confirmRow,
+    block.el,
     errBox,
     h("div", { class: "actions" },
       h("button", { class: "btn", onclick: closeDialog }, "Hủy"),
-      h("button", { class: "btn primary", onclick: save }, "Lưu"),
+      saveBtn,
     ),
   );
+  saveBtn.addEventListener("click", save);
+  refresh();
 }
 
 function pickContent(d) {
@@ -1723,7 +2235,7 @@ async function saveItem(slug, old, item, unansweredId) {
 }
 
 // ---------- Form sửa mục (dùng chung) ----------
-function itemEditor({ slug, form, heading, unansweredId, onDone }) {
+function itemEditor({ slug, form, heading, unansweredId, replyAsks = [], onDone }) {
   const isNew = !slug;
   const old = isNew ? null : state.kb.get(slug);
   const f = { ...form };
@@ -1918,15 +2430,35 @@ function itemEditor({ slug, form, heading, unansweredId, onDone }) {
     addImages(files);
   };
 
+  // ----- Gửi trả lời cho người đã hỏi (mục 6.2, 6.3) -----
+  let lastRes = null;
+  const block = unansweredId && replyAsks.length
+    ? replyBlock({
+      asks: replyAsks,
+      defaultAnswer: () => defaultReplyAnswer(lastRes?.item ?? { answer: f.answer, links: [] }),
+      blocked: () => (f.status !== "approved"
+        ? "Chỉ gửi được khi mục lưu ở trạng thái Đã duyệt (chọn ở ô Trạng thái bên trên)." : null),
+      onChange: () => updateSaveBtn(),
+    })
+    : null;
+
+  function updateSaveBtn() {
+    const s = block?.state();
+    const sending = !!s?.active;
+    saveBtn.disabled = !lastRes?.item || uploading > 0 || (sending && !s.valid);
+    saveBtn.textContent = uploading > 0 ? "Đang tải ảnh…" : sending ? `Duyệt & gửi (${s.plan.sendable} nhóm)` : "Lưu";
+  }
+
   function check() {
     const len = charLength(cleanText(f.answer));
     counter.textContent = `${len}/${MAX_ANSWER_CHARS} ký tự`;
     counter.className = len > MAX_ANSWER_CHARS ? "count over" : "count";
     const res = validateItemForm(f, { isNew, existingSlugs: existing, localImageUrls: emulator });
+    lastRes = res;
     confirmRow.hidden = !(res.item && needsLiveConfirm(old, res.item));
     errList.replaceChildren(...[list("errs", res.errors), list("warns", res.warnings)].filter(Boolean));
-    saveBtn.disabled = !res.item || uploading > 0;
-    saveBtn.textContent = uploading > 0 ? "Đang tải ảnh…" : "Lưu";
+    if (block) block.refresh();
+    else updateSaveBtn();
     return res;
   }
 
@@ -1936,19 +2468,33 @@ function itemEditor({ slug, form, heading, unansweredId, onDone }) {
     if (needsLiveConfirm(old, res.item) && !confirmBox.checked) {
       return errList.replaceChildren(msg("bad", "Đánh dấu ô xác nhận trước khi lưu mục đã duyệt."));
     }
+    const send = block?.state();
+    if (send?.active) {
+      if (!send.valid) return;
+      if (!confirm(`Gửi trả lời vào ${send.plan.sendable} nhóm/chat?`)) return;
+    }
     if (old && !buildItemWrite(old, res.item, "", null) && !unansweredId) {
       closeDialog();
       return;
     }
     saveBtn.disabled = true;
+    const savedSlug = isNew ? res.slug : slug;
     try {
-      await saveItem(isNew ? res.slug : slug, old, res.item, unansweredId);
-      closeDialog();
-      await onDone?.();
+      // (1) Lưu kho như cũ. Lỗi thì không gửi.
+      await saveItem(savedSlug, old, res.item, unansweredId);
     } catch (e) {
       errList.replaceChildren(msg("bad", errText(e)));
-      saveBtn.disabled = false;
+      updateSaveBtn();
+      return;
     }
+    if (send?.active) {
+      // (2) Gửi; lỗi gửi không hoàn tác đáp án đã lưu.
+      await runSend({ unansweredId, answerText: send.answerText, askIds: send.selected.map((a) => a.id),
+        kbItemId: savedSlug, asks: replyAsks, title: "Đã lưu đáp án. Gửi trả lời cho người đã hỏi", onClose: onDone });
+      return;
+    }
+    closeDialog();
+    await onDone?.();
   });
 
   const meta = old
@@ -1982,6 +2528,7 @@ function itemEditor({ slug, form, heading, unansweredId, onDone }) {
     field("source", "Nguồn", "bắt buộc khi duyệt", h("input", { autocomplete: "off" })),
     field("status", "Trạng thái", "chỉ mục Đã duyệt mới được bot dùng; không xóa mục, dùng Đã ẩn", statusSelect),
     confirmRow,
+    block?.el,
     errList,
     h("div", { class: "actions" },
       h("button", { class: "btn", onclick: closeDialog }, "Hủy"),
@@ -2218,6 +2765,8 @@ async function renderStats() {
     h("div", { class: "tiles" },
       tile("Tin đã gửi (hạn mức Zalo)", `${fmtNum.format(sent)} / ${fmtNum.format(msgLimit)}`, meter(sent, msgLimit)),
       tile("Lỗi gửi tin", fmtNum.format(usage.send_errors ?? 0)),
+      tile("Admin trả lời người hỏi", fmtNum.format(usage.admin_replies_sent ?? 0),
+        h("span", { class: "muted" }, `đã tính trong tin đã gửi; lỗi: ${fmtNum.format(usage.admin_reply_errors ?? 0)}`)),
       tile("Ảnh đã gửi", fmtNum.format(usage.photos_sent ?? 0),
         h("span", { class: "muted" }, `đã tính trong tin đã gửi; lỗi ảnh: ${fmtNum.format(usage.photo_errors ?? 0)}`)),
       tile("Lượt gọi AI", `${fmtNum.format(aiCalls)} / ${fmtNum.format(aiLimit)}`, meter(aiCalls, aiLimit)),
