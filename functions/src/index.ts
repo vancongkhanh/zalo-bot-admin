@@ -135,7 +135,8 @@ export const usdVndRate = onCall({ timeoutSeconds: 20, maxInstances: 2 }, async 
  */
 const handleOa = createOaHandler({
   getKeys: () => ({ oa: ZALO_OA_SECRET_KEY.value(), app: ZALO_APP_SECRET_KEY.value() }),
-  log: (entry) => fnLogger.info("zalo_oa_event", entry),
+  // Thông điệp log: "zalo_verifier_hit" (OA-0b) hoặc "zalo_oa_event" (OA-0).
+  log: (entry) => fnLogger.info(typeof entry.event === "string" ? entry.event : "zalo_oa_event", entry),
 });
 
 export const zaloOaWebhook = onRequest(

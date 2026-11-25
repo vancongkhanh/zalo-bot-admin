@@ -8,11 +8,14 @@
  */
 import { createHash, createHmac } from "node:crypto";
 import { headerValue, safeEqual } from "./security";
+import { loggedName, looksLikeVerifier, matchVerifier } from "./zaloVerifier";
 
 export type Headers = Record<string, string | string[] | undefined>;
 
 export interface OaRequest {
   method?: string;
+  /** Đường dẫn (Express `req.path`, không có query string). */
+  path?: string;
   headers?: Headers;
   /** Bytes gốc của body (Cloud Functions lưu trước khi parse). */
   rawBody?: Buffer;
@@ -20,7 +23,9 @@ export interface OaRequest {
 }
 
 export interface OaResponse {
-  status(code: number): { json(body: unknown): unknown };
+  status(code: number): { json(body: unknown): unknown; send?(body: unknown): unknown };
+  /** Cần cho OA-0b (trả tệp xác thực); thiếu thì quay về {"ok":true}. */
+  setHeader?(name: string, value: string): unknown;
 }
 
 /** Khóa ứng viên để thử chữ ký; thiếu hoặc là giá trị giữ chỗ thì bỏ qua. */
@@ -238,6 +243,7 @@ export function createOaHandler(deps: OaDeps) {
     const start = now();
     const isCold = coldStart;
     coldStart = false;
+    if (serveVerifier(req, res, deps, isCold, () => now() - start)) return;
     let entry: Record<string, unknown>;
     try {
       entry = analyzeOaRequest(req, safeKeys(deps.getKeys));
@@ -259,6 +265,62 @@ export function createOaHandler(deps: OaDeps) {
       // Bỏ qua: không được ảnh hưởng response.
     }
   };
+}
+
+/**
+ * OA-0b: GET/HEAD tới đúng tên tệp xác thực thì trả tệp (200, text/html) và trả true.
+ * Mọi trường hợp khác (kể cả lỗi) trả false để đi tiếp luồng OA-0. Log chỉ có tên tệp và matched.
+ */
+function serveVerifier(
+  req: OaRequest,
+  res: OaResponse,
+  deps: OaDeps,
+  isCold: boolean,
+  elapsed: () => number,
+): boolean {
+  let path: unknown;
+  let method: unknown;
+  try {
+    path = req.path;
+    method = req.method;
+  } catch {
+    return false;
+  }
+  if (!looksLikeVerifier(path)) return false;
+  const hit = method === "GET" || method === "HEAD" ? matchVerifier(path) : null;
+  let served = false;
+  if (hit) {
+    try {
+      if (typeof res.setHeader !== "function") throw new Error("no setHeader");
+      const r = res.status(200);
+      if (typeof r.send !== "function") throw new Error("no send");
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.setHeader("Cache-Control", "no-store");
+      r.send(hit.content); // Express tự bỏ body với HEAD.
+      served = true;
+    } catch {
+      served = false;
+      try {
+        res.setHeader?.("Content-Type", "application/json; charset=utf-8");
+      } catch {
+        // Bỏ qua.
+      }
+    }
+  }
+  try {
+    deps.log({
+      event: "zalo_verifier_hit",
+      method: typeof method === "string" ? method : null,
+      file: hit ? hit.name : loggedName(path as string),
+      matched: hit !== null,
+      served,
+      duration_ms: Math.round(elapsed() * 1000) / 1000,
+      cold_start: isCold,
+    });
+  } catch {
+    // Bỏ qua: không được ảnh hưởng response.
+  }
+  return served;
 }
 
 function safeKeys(getKeys: () => OaKeys): OaKeys {

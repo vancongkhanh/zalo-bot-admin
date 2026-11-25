@@ -139,7 +139,7 @@ Nhóm không có trong danh sách: không ghi `conversations`, chỉ ghi dòng C
 
 | Phần | Lệnh | Ghi chú |
 |---|---|---|
-| Hàm | `cd functions`, `npm install`, `npm run build`, `npm test` | 219 kiểm thử (riêng OA-0: `npx vitest run test/oaWebhook.test.ts`) |
+| Hàm | `cd functions`, `npm install`, `npm run build`, `npm test` | 262 kiểm thử (riêng OA-0/OA-0b: `npx vitest run test/oaWebhook.test.ts test/zaloVerifier.test.ts`) |
 | Script kho | `cd scripts/kb`, `npm install`, `npm test` | 50 kiểm thử |
 | Trang quản trị | `cd admin`, `npm install`, `npm test` | 74 kiểm thử logic |
 | Quy tắc Firestore và Storage | `cd admin`, `npm run test:rules` | 98 kiểm thử trên emulator, cần Java 21 (Temurin) |
@@ -164,6 +164,7 @@ Hàm `zaloOaWebhook` ([functions/src/oaWebhook.ts](functions/src/oaWebhook.ts), 
 - Log: một dòng `zalo_oa_event` (severity INFO) trong Logs Explorer. Chỉ ghi độ dài text, 8 ký tự băm của ID, tên header, loại đính kèm, `sig_match` theo từng khóa (`oa_key`, `app_key`: `V1`-`V4`, `none` hoặc `skipped`).
 - Đổi khóa: `firebase functions:secrets:set ZALO_OA_SECRET_KEY` (hoặc `ZALO_APP_SECRET_KEY`), rồi `firebase deploy --only functions:zaloOaWebhook`.
 - Lưu ý: `firebase deploy --only functions` (toàn bộ) cũng cần hai secret này tồn tại.
+- OA-0b, xác thực quyền sở hữu URL: `GET`/`HEAD` tới `.../zaloOaWebhook/zalo_verifier<TÊN>.html` trả nguyên tệp HTML của Zalo (`text/html`). Nội dung nhúng trong [functions/src/zaloVerifier.ts](functions/src/zaloVerifier.ts), bản gốc ở `docs/`; test so từng byte. Tên tệp được đối chiếu nguyên văn với danh sách cho phép, lúc chạy không đọc file. Log `zalo_verifier_hit` chỉ ghi tên tệp và `matched`. Thêm tệp mới: chép vào `docs/`, thêm một mục vào `VERIFIER_FILES`, chạy test, deploy lại.
 
 ## Đăng ký webhook
 
