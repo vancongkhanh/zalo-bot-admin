@@ -107,6 +107,7 @@
   .chip.st-warn { background: var(--warn-bg); color: var(--warn); }
   .chip.st-bad { background: var(--bad-bg); color: var(--bad); }
   .chip.st-muted { color: var(--muted); }
+  .chip.st-admin { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
   .histd { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 6px; }
   .histd h4 { margin: 10px 0 4px; font-size: 14px; }
   .kv { display: grid; grid-template-columns: 130px 1fr; gap: 8px; font-size: 14px; overflow-wrap: anywhere; }
@@ -811,7 +812,10 @@ const HISTORY_KINDS = [
   ["handoff", "Chuyển ca"],
   ["error", "Lỗi"],
   ["silent", "Bot không trả lời"],
+  ["admin", "Admin trả lời"],
 ];
+/** Kết quả có gọi tên bot, cộng tin admin gửi từ trang quản trị (Trả lời người hỏi). */
+const HISTORY_OUTCOMES = ["answered", "replied", "handoff", "error", "admin_reply"];
 const HISTORY_RANGES = [
   ["today", "Hôm nay"],
   ["7", "7 ngày"],
@@ -831,7 +835,8 @@ function historyClauses(kind) {
   if (kind === "handoff") return [handoff];
   if (kind === "error") return [["outcome", ["error"]], ["send_ok", [false]]];
   if (kind === "silent") return [silent];
-  return [["outcome", ["answered", "replied", "handoff", "error"]], silent];
+  if (kind === "admin") return [["outcome", ["admin_reply"]]];
+  return [["outcome", HISTORY_OUTCOMES], silent];
 }
 
 /** Mốc bắt đầu: "today" là 0 giờ hôm nay giờ Việt Nam; số là n ngày gần nhất (gồm hôm nay). */
@@ -845,11 +850,23 @@ function historySince(range, now = new Date()) {
 function isHistoryRecord(c) {
   if (!c || typeof c !== "object") return false;
   if (c.outcome === "ignored") return SILENT_REASONS.includes(c.ignore_reason);
-  return ["answered", "replied", "handoff", "error"].includes(c.outcome);
+  return HISTORY_OUTCOMES.includes(c.outcome);
+}
+
+const isAdminReply = (c) => c?.outcome === "admin_reply";
+
+/** Tên hiện ở dòng Lịch sử: người nhắn, hoặc người được admin trả lời. */
+function historyPeople(c) {
+  if (isAdminReply(c)) {
+    const names = Array.isArray(c.reply_to_names) ? c.reply_to_names.filter((x) => typeof x === "string" && x) : [];
+    return names.length ? names.join(", ") : "(không tên)";
+  }
+  return c.display_name || "(không tên)";
 }
 
 /** Nhãn kết quả của một lần hỗ trợ. */
 function historyStatus(c) {
+  if (isAdminReply(c)) return { key: "admin", label: "Admin trả lời", cls: "admin" };
   if (c.outcome === "error" || c.send_ok === false) return { key: "error", label: "Lỗi gửi tin", cls: "bad" };
   if (c.outcome === "answered" || c.outcome === "replied") return { key: "answered", label: "Trả lời được", cls: "ok" };
   if (c.outcome === "handoff") return { key: "handoff", label: "Chuyển ca", cls: "warn" };
@@ -862,7 +879,7 @@ function matchesKind(c, kind) {
 }
 
 function historySummary(rows) {
-  const out = { total: 0, answered: 0, handoff: 0, error: 0, silent: 0, image: 0 };
+  const out = { total: 0, answered: 0, handoff: 0, error: 0, silent: 0, admin: 0, image: 0 };
   for (const c of rows) {
     out.total++;
     out[historyStatus(c).key]++;
@@ -879,7 +896,7 @@ function filterHistory(rows, q = "") {
   const needle = unaccent(q).trim();
   if (!needle) return rows;
   return rows.filter((c) =>
-    unaccent([c.display_name, maskPii(c.question), c.reply_text, c.image_summary, c.matched_slug].join("\n"))
+    unaccent([historyPeople(c), maskPii(c.question), c.reply_text, c.image_summary, c.matched_slug].join("\n"))
       .includes(needle));
 }
 
@@ -1538,7 +1555,7 @@ function drawHistory(notice) {
     const t = historySummary(rows);
     summaryBox.textContent = `${fmtNum.format(t.total)} lần hỗ trợ${hist.done ? "" : " (đã tải " +
       fmtNum.format(hist.rows.length) + ", còn nữa)"}: ${t.answered} trả lời được, ${t.handoff} chuyển ca, ` +
-      `${t.error} lỗi, ${t.silent} bot không trả lời; ${t.image} tin ảnh.`;
+      `${t.error} lỗi, ${t.silent} bot không trả lời, ${t.admin} admin trả lời; ${t.image} tin ảnh.`;
     const slice = pageSlice(rows, hist.page, hist.size);
     hist.page = slice.page;
     listBox.replaceChildren(...nodes(
@@ -1594,6 +1611,7 @@ function historyCard(c) {
   const revealed = hist.revealed.has(c.id);
   const item = c.matched_slug ? state.kb.get(c.matched_slug) : null;
   const isImage = c.source === "image";
+  const admin = isAdminReply(c);
   const piiHere = hasPii(c.question, c.image_text);
   const photo = isImage ? safePhotoUrl(c.photo_url) : null;
   const openLabel = revealLabel(!!photo, piiHere);
@@ -1636,7 +1654,7 @@ function historyCard(c) {
       isImage ? h("span", { class: "chip", title: "Người dùng gửi ảnh" }, "Ảnh") : null,
       h("span", { class: "muted" }, when(c.created_at)),
       h("span", { class: "muted" }, hist.labels[c.chat_id] ?? "Nhóm khác"),
-      h("span", { class: "muted" }, c.display_name || "(không tên)"),
+      h("span", { class: "muted" }, admin ? `Trả lời: ${historyPeople(c)}` : historyPeople(c)),
       h("span", { class: "muted", style: "margin-left:auto" }, isOpen ? "Thu gọn ▴" : "Chi tiết ▾"),
     ),
     h("p", { class: "sample", style: "margin:6px 0 0" },
@@ -1652,7 +1670,7 @@ function historyCard(c) {
         revealed
           ? h("button", { class: "btn", onclick: hide }, photo ? "Ẩn lại" : "Ẩn thông tin cá nhân")
           : h("button", { class: "btn", onclick: reveal }, openLabel)) : null,
-      h("section", {},
+      admin ? null : h("section", {},
         h("h4", {}, "Người dùng đã nhắn"),
         meta("Người gửi", c.display_name || "(không tên)"),
         meta("Nhóm", hist.labels[c.chat_id] ?? "Nhóm khác"),
@@ -1671,7 +1689,25 @@ function historyCard(c) {
             ? "Bot không tải được ảnh nên không đọc được."
             : "Không có chữ đọc từ ảnh (ảnh gửi trước bước G, đang tắt chép chữ, hoặc ảnh không có chữ)."),
       ) : null,
-      h("section", {},
+      admin ? h("section", {},
+        h("h4", {}, "Câu hỏi được trả lời"),
+        meta("Người hỏi", historyPeople(c)),
+        meta("Nhóm", hist.labels[c.chat_id] ?? "Nhóm khác"),
+        meta("Số lượt hỏi", Array.isArray(c.ask_ids) ? String(c.ask_ids.length) : null),
+        h("div", { class: "quote" }, c.question ? piiText(c.question, revealed) : h("span", { class: "muted" }, "(trống)")),
+      ) : null,
+      admin ? h("section", {},
+        h("h4", {}, "Admin đã gửi"),
+        meta("Kết quả", "Đã gửi vào nhóm"),
+        meta("Người gửi", c.sent_by || "(không rõ)"),
+        meta("Thời gian", when(c.created_at)),
+        meta("Mục kho", item || c.matched_slug ? `${item?.title ?? "(mục đã xóa)"} (${c.matched_slug})` : null),
+        h("div", { class: "quote" }, c.reply_text || ""),
+        item ? h("div", { class: "actions" },
+          h("button", { class: "btn", onclick: () => itemEditor({
+            slug: c.matched_slug, form: itemToForm(c.matched_slug, item), onDone: () => go("history"),
+          }) }, "Mở mục")) : null,
+      ) : h("section", {},
         h("h4", {}, "Bot đã hỗ trợ"),
         meta("Kết quả", st.label),
         meta("Mục đã chọn", item || c.matched_slug ? `${item?.title ?? "(mục đã xóa)"} (${c.matched_slug})` : null),
@@ -2729,6 +2765,8 @@ async function renderStats() {
     h("div", { class: "tiles" },
       tile("Tin đã gửi (hạn mức Zalo)", `${fmtNum.format(sent)} / ${fmtNum.format(msgLimit)}`, meter(sent, msgLimit)),
       tile("Lỗi gửi tin", fmtNum.format(usage.send_errors ?? 0)),
+      tile("Admin trả lời người hỏi", fmtNum.format(usage.admin_replies_sent ?? 0),
+        h("span", { class: "muted" }, `đã tính trong tin đã gửi; lỗi: ${fmtNum.format(usage.admin_reply_errors ?? 0)}`)),
       tile("Ảnh đã gửi", fmtNum.format(usage.photos_sent ?? 0),
         h("span", { class: "muted" }, `đã tính trong tin đã gửi; lỗi ảnh: ${fmtNum.format(usage.photo_errors ?? 0)}`)),
       tile("Lượt gọi AI", `${fmtNum.format(aiCalls)} / ${fmtNum.format(aiLimit)}`, meter(aiCalls, aiLimit)),
