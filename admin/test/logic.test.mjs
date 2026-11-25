@@ -173,6 +173,7 @@ describe("Cài đặt", () => {
       image_text_enabled: true,
       monthly_image_ai_limit: "300",
       image_quota_message: BOT_DEFAULTS.image_quota_message,
+      suggestion_warn_confidence: "0.85",
       chats: [],
     });
   });
@@ -193,8 +194,19 @@ describe("Cài đặt", () => {
       max_images_per_answer: 4, image_ai_enabled: false, image_summary_enabled: true, image_text_enabled: true,
       monthly_image_ai_limit: 300,
       image_quota_message: BOT_DEFAULTS.image_quota_message,
+      suggestion_warn_confidence: 0.85,
       allowed_chat_ids: ["g1", "g2"], chat_labels: { g1: "Nhóm 1" },
     });
+  });
+
+  it("ngưỡng cảnh báo khi thêm câu gợi ý: đọc, ghi, từ chối ngoài 0–1", () => {
+    expect(settingsFromConfig({ suggestion_warn_confidence: 0.9 }).suggestion_warn_confidence).toBe("0.9");
+    expect(settingsFromConfig({ suggestion_warn_confidence: 3 }).suggestion_warn_confidence).toBe("0.85");
+    const base = { ...settingsFromConfig({}), handoff_message: "ok" };
+    expect(validateSettings({ ...base, suggestion_warn_confidence: "0,8" }).data.suggestion_warn_confidence).toBe(0.8);
+    for (const v of ["", "1.5", "-0.1", "abc"]) {
+      expect(validateSettings({ ...base, suggestion_warn_confidence: v }).errors.join()).toContain("câu gợi ý");
+    }
   });
 
   it("bước F: đọc và ghi bốn trường đọc ảnh", () => {
@@ -639,5 +651,71 @@ describe("trả lời người hỏi: hàm phụ của trang", () => {
     expect(logic.replyResultLabel({ status: "failed", error: "TEXT_TOO_LONG" }).text).toBe("Lỗi: Tin quá 2.000 ký tự");
     expect(logic.replyResultLabel({ status: "failed", error: "api_error[-201]: x" }).text).toBe("Lỗi: api_error[-201]: x");
     expect(logic.replyResultLabel({ status: "skipped", error: "ALREADY_SENT" }).text).toBe("Đã gửi trước đó");
+  });
+});
+
+describe("Thêm vào câu gợi ý (spec câu gợi ý, bước 3)", () => {
+  const fx = JSON.parse(readFileSync(new URL("../../functions/test/fixtures/suggestion-text.json", import.meta.url), "utf8"));
+  const { cleanSuggestion, normalizeSuggestion, suggestionHasPii, suggestionPrefill, suggestionState, checkSuggestion,
+    lowSuggestionConfidence } = logic;
+
+  it.each(fx.normalize)("bộ mẫu chung: normalize %o", ({ in: s, out }) => expect(normalizeSuggestion(s)).toBe(out));
+  it.each(fx.clean)("bộ mẫu chung: clean %o", ({ in: s, out }) => expect(cleanSuggestion(s, fx.botName)).toBe(out));
+  it.each(fx.pii)("bộ mẫu chung: pii %o", ({ in: s, out }) => expect(suggestionHasPii(s)).toBe(out));
+
+  it("S3: điền sẵn câu đã bỏ @bot; thông tin cá nhân thay bằng [đã ẩn]", () => {
+    expect(suggestionPrefill("@Bot TTHC Đảng  cài ký số\nthế nào", "Bot TTHC Đảng")).toBe("cài ký số thế nào");
+    expect(suggestionPrefill("ký số lỗi gọi 0912 345 678 nhé", "Bot TTHC Đảng")).toBe("ký số lỗi gọi [đã ẩn] nhé");
+  });
+
+  const kb = new Map([
+    ["ky-so", { title: "Cài ký số", status: "approved", questions: ["cài ký số", "video cài ký số"] }],
+    ["con-dau", { title: "Con dấu", status: "approved", questions: ["cấu hình con dấu"] }],
+    ["nhap", { title: "Nháp", status: "draft", questions: [] }],
+    ["day", { title: "Đầy", status: "approved", questions: Array.from({ length: 50 }, (_, i) => `câu ${i}`) }],
+  ]);
+  const row = (o = {}) => ({ outcome: "answered", send_ok: true, matched_slug: "ky-so", question: "cài ký số sao", ...o });
+
+  it("S1, S2, S12: nút chỉ ở lượt Trả lời được, có mục còn Đã duyệt, có chữ; S5: đã thêm thì là nhãn", () => {
+    expect(suggestionState(row(), kb)).toBe("button");
+    expect(suggestionState(row({ outcome: "replied" }), kb)).toBe("button");
+    expect(suggestionState(row({ outcome: "handoff" }), kb)).toBe(null);
+    expect(suggestionState(row({ outcome: "error" }), kb)).toBe(null);
+    expect(suggestionState(row({ send_ok: false }), kb)).toBe(null);
+    expect(suggestionState(row({ outcome: "ignored", ignore_reason: "quota" }), kb)).toBe(null);
+    expect(suggestionState(row({ outcome: "admin_reply" }), kb)).toBe(null);
+    expect(suggestionState(row({ matched_slug: null }), kb)).toBe(null);
+    expect(suggestionState(row({ matched_slug: "da-xoa" }), kb)).toBe(null);
+    expect(suggestionState(row({ matched_slug: "nhap" }), kb)).toBe(null);
+    expect(suggestionState(row({ question: "  " }), kb)).toBe(null);
+    expect(suggestionState(row({ source: "image", question: "lỗi này là sao" }), kb)).toBe("button");
+    expect(suggestionState(row({ suggestion_added_at: { seconds: 1 }, suggestion_kb_item_id: "ky-so" }), kb)).toBe("added");
+  });
+
+  it("S8: cảnh báo vàng khi độ tin cậy dưới ngưỡng", () => {
+    expect(lowSuggestionConfidence(0.8, 0.85)).toBe(true);
+    expect(lowSuggestionConfidence(0.85, 0.85)).toBe(false);
+    expect(lowSuggestionConfidence(null, 0.85)).toBe(false);
+  });
+
+  it("độ dài 5–300, thông tin cá nhân, mục không dùng được, mục đủ 50 câu → chặn lưu", () => {
+    expect(checkSuggestion("cài ký số thế nào", "ky-so", kb, "Bot TTHC Đảng").errors).toEqual([]);
+    expect(checkSuggestion("ký", "ky-so", kb).errors[0]).toContain("5–300");
+    expect(checkSuggestion("x".repeat(301), "ky-so", kb).errors[0]).toContain("5–300");
+    expect(checkSuggestion("ký số lỗi [đã ẩn] nhé", "ky-so", kb).errors.join()).toContain("thông tin cá nhân");
+    expect(checkSuggestion("cài ký số thế nào", "nhap", kb).errors.join()).toContain("Đã duyệt");
+    expect(checkSuggestion("cài ký số thế nào", "", kb).errors.join()).toContain("Chọn mục");
+    const full = checkSuggestion("câu mới hoàn toàn", "day", kb);
+    expect(full.full).toBe(true);
+    expect(full.errors.join()).toContain("50");
+    // Câu đã có trong mục đủ 50: không chặn (máy chủ chỉ đánh dấu).
+    expect(checkSuggestion("Câu 3!", "day", kb)).toMatchObject({ same: true, full: false, errors: [] });
+  });
+
+  it("S6, S7: trùng trong mục, chỉ khác dấu, trùng ở mục khác", () => {
+    expect(checkSuggestion("Cài   KÝ SỐ???", "ky-so", kb)).toMatchObject({ same: true, others: [] });
+    expect(checkSuggestion("cai ky so", "ky-so", kb)).toMatchObject({ same: false, accentOnly: "cài ký số" });
+    expect(checkSuggestion("Cấu hình con dấu!", "ky-so", kb).others).toEqual([{ slug: "con-dau", title: "Con dấu", status: "approved" }]);
+    expect(checkSuggestion("Cấu hình con dấu!", "con-dau", kb)).toMatchObject({ same: true, others: [] });
   });
 });

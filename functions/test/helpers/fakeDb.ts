@@ -65,9 +65,20 @@ export class FakeDb {
   reads = 0;
   transactions = 0;
 
+  private autoId = 0;
+
+  /** Tài liệu ngay dưới collection (không gồm subcollection). */
+  private list(name: string) {
+    return [...this.docs.entries()]
+      .filter(([p]) => p.startsWith(`${name}/`) && !p.slice(name.length + 1).includes("/"))
+      .map(([p, d]) => ({ id: p.slice(name.length + 1), data: () => d }));
+  }
+
   collection(name: string) {
     return {
-      doc: (id: string) => this.ref(`${name}/${id}`),
+      /** tx.get(collection) đọc cả collection như một truy vấn. */
+      __collection: name,
+      doc: (id?: string) => this.ref(`${name}/${id ?? `auto${++this.autoId}`}`),
       where: (field: string, _op: string, value: unknown) => ({
         get: async () => {
           this.reads++;
@@ -83,7 +94,8 @@ export class FakeDb {
   async runTransaction<T>(fn: (tx: unknown) => Promise<T>): Promise<T> {
     this.transactions++;
     const tx = {
-      get: (ref: { path: string }) => Promise.resolve(this.snap(ref.path)),
+      get: (ref: { path?: string; __collection?: string }) =>
+        Promise.resolve(ref.__collection ? { docs: this.list(ref.__collection) } : this.snap(ref.path!)),
       set: (ref: { path: string }, data: Data, opts?: { merge?: boolean }) => {
         this.docs.set(ref.path, this.apply(opts?.merge ? this.docs.get(ref.path) : undefined, data));
       },

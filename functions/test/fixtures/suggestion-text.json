@@ -1,0 +1,28 @@
+{
+  "_note": "Bộ mẫu chung cho functions/src/suggestion.ts và bản chép trong admin/index.html (Thêm vào câu gợi ý).",
+  "botName": "Bot TTHC Đảng",
+  "normalize": [
+    { "in": "Nộp thuế ở đâu?", "out": "nộp thuế ở đâu" },
+    { "in": "  NỘP   thuế, ở đâu ạ!!! ", "out": "nộp thuế ở đâu ạ" },
+    { "in": "nop thue o dau", "out": "nop thue o dau" },
+    { "in": "Cài chữ-ký số (USB token)?", "out": "cài chữ ký số usb token" },
+    { "in": "Đổi mật khẩu", "out": "đổi mật khẩu" },
+    { "in": "...", "out": "" }
+  ],
+  "clean": [
+    { "in": "@Bot TTHC Đảng   cài ký số\n thế nào ", "out": "cài ký số thế nào" },
+    { "in": "cài ký số @bot  tthc đảng", "out": "cài ký số" },
+    { "in": "  đổi\tmật khẩu  ", "out": "đổi mật khẩu" }
+  ],
+  "pii": [
+    { "in": "gọi 0912 345 678 giúp em", "out": true },
+    { "in": "số +84912345678", "out": true },
+    { "in": "mail a.b@x.gov.vn", "out": true },
+    { "in": "CCCD 001234567890", "out": true },
+    { "in": "Hồ sơ [đã ẩn] bị lỗi", "out": true },
+    { "in": "⟦Nguyễn Văn A⟧ hỏi", "out": true },
+    { "in": "Lỗi 404 khi ký số", "out": false },
+    { "in": "ngày 17/11/2026 không nộp được", "out": false },
+    { "in": "phiên bản 2.10.3 cài thế nào", "out": false }
+  ]
+}

@@ -94,6 +94,25 @@ await env.withSecurityRulesDisabled(async (ctx) => {
     error: "send_failed:500", reply_text: "Hướng dẫn mẫu cho \"Đổi mật khẩu\".",
   });
   await conv("c7", 2, { question: "hai người nói chuyện riêng", outcome: "ignored", ignore_reason: "no_mention" });
+  // Thêm câu gợi ý từ Lịch sử: có số điện thoại (phải xóa mới lưu), mục còn Nháp (không có nút),
+  // đã thêm (nhãn ✓), câu đang là gợi ý của mục khác (cảnh báo đỏ).
+  await conv("c8", 4, {
+    question: "cài ký số trên máy mới, gọi em 0912 345 678", outcome: "answered", matched_slug: "ky-so",
+    confidence: 0.78, reason: null, send_ok: true, reply_text: "Hướng dẫn mẫu cho \"Cài đặt chữ ký số\".",
+  });
+  await conv("c9", 6, {
+    question: "đổi mật khẩu đăng nhập", outcome: "answered", matched_slug: "doi-mat-khau", confidence: 0.92,
+    reason: null, send_ok: true, reply_text: "Hướng dẫn mẫu cho \"Đổi mật khẩu\".",
+  });
+  await conv("c10", 7, {
+    question: "video cài chữ ký số", outcome: "answered", matched_slug: "ky-so", confidence: 0.95, reason: null,
+    send_ok: true, reply_text: "Hướng dẫn mẫu cho \"Cài đặt chữ ký số\".",
+    suggestion_added_at: ago(6), suggestion_kb_item_id: "ky-so",
+  });
+  await conv("c11", 9, {
+    question: "Cấu hình con dấu?", outcome: "answered", matched_slug: "ky-so", confidence: 0.6, reason: null,
+    send_ok: true, reply_text: "Hướng dẫn mẫu cho \"Cài đặt chữ ký số\".",
+  });
   // Bước 6: tin admin gửi từ trang quản trị (Trả lời người hỏi).
   await conv("admin_reply_batch-gia_1", 0.5, {
     outcome: "admin_reply", from_id: null, display_name: null, chat_type: "GROUP", question: "cài chữ ký số",

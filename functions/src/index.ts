@@ -19,6 +19,8 @@ import { FirestoreReplyRepo } from "./replyStore";
 import { createOaHandler } from "./oaWebhook";
 import { FirestoreStore } from "./store";
 import { handleSuggest } from "./suggest";
+import { handleAddSuggestion } from "./suggestion";
+import { FirestoreSuggestionRepo } from "./suggestionStore";
 import { handleWebhook, Logger } from "./webhook";
 import { createZaloClient } from "./zaloClient";
 
@@ -163,6 +165,25 @@ export const sendReplyToAskers = onCall(
     return { batchId: r.batchId, results: r.results };
   },
 );
+
+/**
+ * Trang quản trị, tab Lịch sử: thêm câu người dùng đã hỏi vào "Các cách hỏi" của một mục
+ * (docs/spec-them-cau-hoi-goi-y.md). Kiểm tra trùng, ghi mục + kb_suggestion_log + đánh dấu Lịch sử
+ * trong một transaction. Chỉ người trong admins gọi được.
+ */
+export const addSuggestedQuestion = onCall({ timeoutSeconds: 30, maxInstances: 2 }, async (request) => {
+  store ??= new FirestoreStore(getFirestore());
+  const db = getFirestore();
+  const r = await handleAddSuggestion(callerOf(request.auth), request.data, {
+    isAdmin: async (uid) => (await db.collection("admins").doc(uid).get()).exists,
+    getBotName: async () => (await (store as FirestoreStore).getConfig()).config.botMentionName || null,
+    repo: new FirestoreSuggestionRepo(db),
+    logger,
+  });
+  if (!r.ok) throw new HttpsError(r.code, r.message);
+  const { ok: _ok, ...rest } = r;
+  return rest;
+});
 
 /** Trang quản trị: đánh dấu bỏ qua (không gửi) một số lượt hỏi. */
 export const skipAsks = onCall({ timeoutSeconds: 30, maxInstances: 2 }, async (request) => {

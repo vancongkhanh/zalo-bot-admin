@@ -515,3 +515,44 @@ describe("trả lời người hỏi, bước 4: asks và admin_replies chỉ ad
     }));
   });
 });
+
+describe("thêm câu gợi ý, bước 2: kb_suggestion_log chỉ admin đọc; trang không tự đánh dấu Lịch sử", () => {
+  const LOG = { kb_item_id: "ky-so", question: "cài ký số sao", history_ref: "m1", added_by: ADMIN.email };
+  beforeEach(async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      await setDoc(doc(db, "kb_suggestion_log", "l1"), { ...LOG, added_at: Timestamp.now() });
+      await setDoc(doc(db, "conversations", "h1"), { outcome: "answered", matched_slug: "ky-so", question: "cài ký số sao" });
+    });
+  });
+
+  it("admin đọc được log; người ngoài và chưa đăng nhập thì không (S11)", async () => {
+    await assertSucceeds(getDoc(doc(admin(), "kb_suggestion_log", "l1")));
+    await assertSucceeds(getDocs(collection(admin(), "kb_suggestion_log")));
+    for (const db of [outsider(), anon()]) {
+      await assertFails(getDoc(doc(db, "kb_suggestion_log", "l1")));
+      await assertFails(getDocs(collection(db, "kb_suggestion_log")));
+    }
+  });
+
+  it("kể cả admin không tạo, sửa, xóa log; không tự đặt suggestion_added_at ở Lịch sử", async () => {
+    const db = admin();
+    await assertFails(setDoc(doc(db, "kb_suggestion_log", "l2"), { ...LOG, added_at: serverTimestamp() }));
+    await assertFails(updateDoc(doc(db, "kb_suggestion_log", "l1"), { question: "khác" }));
+    await assertFails(deleteDoc(doc(db, "kb_suggestion_log", "l1")));
+    await assertFails(updateDoc(doc(db, "conversations", "h1"), {
+      suggestion_added_at: serverTimestamp(), suggestion_kb_item_id: "ky-so",
+    }));
+    await assertFails(setDoc(doc(outsider(), "kb_suggestion_log", "l3"), LOG));
+  });
+
+  it("Cài đặt ghi được suggestion_warn_confidence trong [0, 1], từ chối sai kiểu hoặc ngoài khoảng", async () => {
+    const ref = doc(admin(), "config", "main");
+    const stamp = { updated_at: serverTimestamp(), updated_by: ADMIN.email };
+    await assertSucceeds(updateDoc(ref, { suggestion_warn_confidence: 0.85, ...stamp }));
+    await assertSucceeds(updateDoc(ref, { suggestion_warn_confidence: 1, ...stamp }));
+    await assertFails(updateDoc(ref, { suggestion_warn_confidence: 1.2, ...stamp }));
+    await assertFails(updateDoc(ref, { suggestion_warn_confidence: "0.85", ...stamp }));
+    await assertFails(updateDoc(doc(outsider(), "config", "main"), { suggestion_warn_confidence: 0.5, ...stamp }));
+  });
+});

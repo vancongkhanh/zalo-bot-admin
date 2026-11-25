@@ -129,6 +129,13 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // ---------- Thêm câu gợi ý từ Lịch sử (docs/spec-them-cau-hoi-goi-y.md, mục 7) ----------
+    // Chỉ hàm addSuggestedQuestion ghi (cùng transaction với kb_items và conversations). Trang chỉ đọc.
+    match /kb_suggestion_log/{id} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
     // ---------- chỉ đọc ----------
     match /stats_daily/{day} {
       allow read: if isAdmin();
@@ -160,6 +167,7 @@ service cloud.firestore {
                               'allowed_chat_ids', 'chat_labels', 'max_images_per_answer',
                               'image_ai_enabled', 'monthly_image_ai_limit', 'image_quota_message',
                               'image_summary_enabled', 'image_text_enabled',
+                              'suggestion_warn_confidence',
                               'updated_at', 'updated_by'])
         && request.resource.data.updated_at == request.time
         && request.resource.data.updated_by == adminEmail()
@@ -169,6 +177,11 @@ service cloud.firestore {
             || (request.resource.data.confidence_threshold is number
                 && request.resource.data.confidence_threshold >= 0
                 && request.resource.data.confidence_threshold <= 1))
+        // Thêm câu gợi ý: dưới ngưỡng này hộp thoại cảnh báo vàng (mặc định 0.85, trang tự dùng nếu thiếu).
+        && (!('suggestion_warn_confidence' in request.resource.data)
+            || (request.resource.data.suggestion_warn_confidence is number
+                && request.resource.data.suggestion_warn_confidence >= 0
+                && request.resource.data.suggestion_warn_confidence <= 1))
         && (!('handoff_message' in request.resource.data)
             || isStr(request.resource.data.handoff_message, 1, 1000))
         && (!('allowed_chat_ids' in request.resource.data)
