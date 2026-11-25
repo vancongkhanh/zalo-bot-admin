@@ -1,0 +1,2 @@
+# Tệp xác thực Zalo: giữ nguyên byte (test OA-0b so từng byte)
+docs/zalo_verifier*.html -text
