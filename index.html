@@ -188,6 +188,9 @@ const BOT_DEFAULTS = {
   image_summary_enabled: true,
   // Bước G: chép chữ trên ảnh cho màn Lịch sử.
   image_text_enabled: true,
+  bot_mention_name: "Bot TTHC Đảng",
+  // Thêm câu gợi ý từ Lịch sử: dưới ngưỡng này hộp thoại cảnh báo vàng (không ảnh hưởng bot).
+  suggestion_warn_confidence: 0.85,
 };
 const MAX_IMAGE_AI_LIMIT = 10000;
 const MAX_IMAGE_QUOTA_MESSAGE_CHARS = 500;
@@ -574,6 +577,12 @@ function settingsFromConfig(raw) {
     image_quota_message: typeof r.image_quota_message === "string" && r.image_quota_message.trim()
       ? r.image_quota_message
       : BOT_DEFAULTS.image_quota_message,
+    suggestion_warn_confidence: String(
+      typeof r.suggestion_warn_confidence === "number" && r.suggestion_warn_confidence >= 0
+        && r.suggestion_warn_confidence <= 1
+        ? r.suggestion_warn_confidence
+        : BOT_DEFAULTS.suggestion_warn_confidence,
+    ),
     chats: ids.map((id) => ({ id, label: typeof labels[id] === "string" ? labels[id] : "" })),
   };
 }
@@ -584,6 +593,11 @@ function validateSettings(f) {
   const threshold = Number(String(f.confidence_threshold).replace(",", "."));
   if (String(f.confidence_threshold).trim() === "" || !Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
     errors.push("Ngưỡng tin cậy phải là số từ 0 đến 1");
+  }
+  const warnText = String(f.suggestion_warn_confidence ?? BOT_DEFAULTS.suggestion_warn_confidence).replace(",", ".");
+  const suggestionWarn = Number(warnText);
+  if (warnText.trim() === "" || !Number.isFinite(suggestionWarn) || suggestionWarn < 0 || suggestionWarn > 1) {
+    errors.push("Ngưỡng cảnh báo khi thêm câu gợi ý phải là số từ 0 đến 1");
   }
   const handoff = cleanText(f.handoff_message);
   if (!handoff) errors.push("Tin chuyển ca trống");
@@ -639,6 +653,7 @@ function validateSettings(f) {
       image_text_enabled: !!(f.image_text_enabled ?? BOT_DEFAULTS.image_text_enabled),
       monthly_image_ai_limit: imageLimit,
       image_quota_message: imageQuota,
+      suggestion_warn_confidence: suggestionWarn,
       allowed_chat_ids: ids,
       chat_labels: labels,
     },
@@ -1139,6 +1154,94 @@ function replyResultLabel(r) {
   if (r.status === "skipped") return { icon: "⏭", text: REPLY_ERROR_LABELS[r.error] ?? "Bỏ qua", cls: "muted" };
   return { icon: "❌", text: `Lỗi: ${REPLY_ERROR_LABELS[r.error] ?? r.error ?? "không rõ"}`, cls: "bad" };
 }
+
+// ---------- Thêm vào câu gợi ý (docs/spec-them-cau-hoi-goi-y.md) ----------
+// Bản chép của functions/src/suggestion.ts; cùng chạy bộ mẫu functions/test/fixtures/suggestion-text.json.
+// Hàm addSuggestedQuestion là chốt chặn cuối (kiểm trùng, 50 câu, thông tin cá nhân); trang chỉ báo sớm.
+const SUGGESTION_MIN_CHARS = 5;
+const SUGGESTION_MAX_CHARS = 300;
+
+/** Giống buildMentionRegex/stripMention của bot (functions/src/mention.ts). */
+function stripBotMention(text, botName) {
+  const words = String(botName ?? "").normalize("NFC").trim().split(/\s+/).filter(Boolean)
+    .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  if (!words.length) return text;
+  return text.replace(new RegExp(`@\\s*${words.join("\\s+")}(?![\\p{L}\\p{N}])`, "giu"), " ");
+}
+
+/** Câu sẽ lưu: bỏ @tên bot, gộp mọi khoảng trắng (kể cả xuống dòng), trim. */
+function cleanSuggestion(text, botName) {
+  return stripBotMention(String(text ?? "").normalize("NFC"), botName).replace(/\s+/g, " ").trim();
+}
+
+/** Chuỗi so trùng: chữ thường, bỏ dấu câu, gộp khoảng trắng; GIỮ dấu tiếng Việt. */
+function normalizeSuggestion(text) {
+  return String(text ?? "").normalize("NFC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+/** Còn thông tin cá nhân: phần đã ẩn, dấu bọc ⟦⟧, hoặc số điện thoại/CCCD/email. */
+function suggestionHasPii(text) {
+  const s = String(text ?? "");
+  return s.includes(PII_MASK) || s.includes(PII_OPEN) || s.includes(PII_CLOSE) || hasPii(s);
+}
+
+/** Ô nội dung điền sẵn: câu gốc đã bỏ @bot, phần thông tin cá nhân thay bằng [đã ẩn]. */
+function suggestionPrefill(question, botName) {
+  return cleanSuggestion(maskPii(String(question ?? "")), botName);
+}
+
+/**
+ * Thẻ Lịch sử hiện gì (spec mục 3): "added" = nhãn "✓ Đã thêm vào gợi ý"; "button" = nút; null = không có.
+ * Nút chỉ hiện với lượt "Trả lời được" bằng một mục còn ở trạng thái Đã duyệt, có câu chữ.
+ */
+function suggestionState(c, kb) {
+  if (!c || isAdminReply(c) || historyStatus(c).key !== "answered") return null;
+  if (c.suggestion_added_at) return "added";
+  if (typeof c.matched_slug !== "string" || !c.matched_slug) return null;
+  if (kb?.get(c.matched_slug)?.status !== "approved") return null;
+  return cleanSuggestion(c.question, null) ? "button" : null;
+}
+
+/** Cảnh báo vàng khi bot chọn mục với độ tin cậy dưới ngưỡng. */
+function lowSuggestionConfidence(confidence, threshold) {
+  return typeof confidence === "number" && confidence < threshold;
+}
+
+/**
+ * Kiểm tra câu trước khi lưu: lỗi chặn lưu (độ dài, thông tin cá nhân, mục đủ 50 câu, mục không dùng được),
+ * trùng trong mục (same), chỉ khác dấu (accentOnly), trùng ở mục khác (others).
+ */
+function checkSuggestion(text, targetSlug, kb, botName) {
+  const question = cleanSuggestion(text, botName);
+  const length = charLength(question);
+  const errors = [];
+  if (length < SUGGESTION_MIN_CHARS || length > SUGGESTION_MAX_CHARS) {
+    errors.push(`Câu phải dài ${SUGGESTION_MIN_CHARS}–${SUGGESTION_MAX_CHARS} ký tự (đang có ${length}).`);
+  }
+  if (suggestionHasPii(question)) {
+    errors.push("Câu còn thông tin cá nhân (số điện thoại, CCCD, email hoặc phần [đã ẩn]). Xóa đi trước khi lưu.");
+  }
+  const target = kb?.get(targetSlug);
+  if (!target) errors.push("Chọn mục kho.");
+  else if (target.status !== "approved") errors.push("Mục này chưa ở trạng thái Đã duyệt.");
+  const current = (target?.questions ?? []).filter((q) => typeof q === "string");
+  const key = normalizeSuggestion(question);
+  const same = !!key && current.some((q) => normalizeSuggestion(q) === key);
+  const full = !same && current.length >= MAX_QUESTIONS;
+  if (full) errors.push(`Mục đã đủ ${MAX_QUESTIONS} cách hỏi. Xóa bớt ở tab Kho tri thức trước khi thêm.`);
+  const flat = unaccent(key);
+  const accentOnly = same || !key ? null : current.find((q) => unaccent(normalizeSuggestion(q)) === flat) ?? null;
+  const others = [];
+  if (key) {
+    for (const [slug, d] of kb ?? []) {
+      if (slug === targetSlug) continue;
+      if ((d.questions ?? []).some((q) => typeof q === "string" && normalizeSuggestion(q) === key)) {
+        others.push({ slug, title: d.title || slug, status: d.status ?? null });
+      }
+    }
+  }
+  return { question, length, errors, same, full, accentOnly, others, count: current.length };
+}
 /* LOGIC-END */
 
 // =====================================================================
@@ -1309,6 +1412,22 @@ const skipAsksCall = emulator
   ? async ({ askIds }) => ({ data: { skipped: askIds, unchanged: [] } })
   : httpsCallable(getFunctions(app, "asia-southeast1"), "skipAsks", { timeout: 35000 });
 
+// Thêm câu gợi ý từ Lịch sử: hàm addSuggestedQuestion. Emulator không chạy hàm: giả lập quyết định của hàm
+// trên dữ liệu đọc được (không ghi gì; trang tự cập nhật thẻ và mục trong bộ nhớ).
+const addSuggestionCall = emulator
+  ? async ({ historyId, kbItemId, question, force }) => {
+    await new Promise((r) => setTimeout(r, 400));
+    const c = (await getDoc(doc(db, "conversations", historyId))).data();
+    if (!c) throw Object.assign(new Error("Bản ghi Lịch sử không còn (nhật ký giữ 90 ngày)."), { code: "functions/not-found" });
+    if (c.suggestion_added_at) return { data: { status: "already_added", kbItemId: c.suggestion_kb_item_id ?? null } };
+    const chk = checkSuggestion(question, kbItemId, state.kb, state.botName);
+    if (chk.errors.length) throw Object.assign(new Error(chk.errors[0]), { code: "functions/failed-precondition" });
+    if (chk.same) return { data: { status: "duplicate_same", kbItemId } };
+    if (chk.others.length && !force) return { data: { status: "duplicate_other", others: chk.others } };
+    return { data: { status: "added", kbItemId, questionCount: chk.count + 1, itemChanged: kbItemId !== c.matched_slug } };
+  }
+  : httpsCallable(getFunctions(app, "asia-southeast1"), "addSuggestedQuestion", { timeout: 35000 });
+
 /** Lỗi khi gọi hàm (callable) → câu tiếng Việt. */
 function fnErrText(e, fnName) {
   const code = e?.code ?? "";
@@ -1319,7 +1438,10 @@ function fnErrText(e, fnName) {
   return e?.message ? String(e.message) : String(e);
 }
 
-const state = { user: null, tab: "stats", kb: new Map(), maxImages: BOT_DEFAULTS.max_images_per_answer };
+const state = {
+  user: null, tab: "stats", kb: new Map(), maxImages: BOT_DEFAULTS.max_images_per_answer,
+  botName: BOT_DEFAULTS.bot_mention_name, suggestWarn: BOT_DEFAULTS.suggestion_warn_confidence,
+};
 
 async function loadKb() {
   const [snap, cfg] = await Promise.all([
@@ -1328,7 +1450,13 @@ async function loadKb() {
   ]);
   state.kb = new Map(snap.docs.map((d) => [d.id, d.data()]));
   // Số ảnh bot gửi mỗi câu (để form mục giải thích ảnh nào thành link).
-  if (cfg?.exists()) state.maxImages = Number(settingsFromConfig(cfg.data()).max_images_per_answer);
+  if (cfg?.exists()) {
+    const raw = cfg.data();
+    const s = settingsFromConfig(raw);
+    state.maxImages = Number(s.max_images_per_answer);
+    state.suggestWarn = Number(s.suggestion_warn_confidence);
+    if (typeof raw.bot_mention_name === "string" && raw.bot_mention_name.trim()) state.botName = raw.bot_mention_name.trim();
+  }
   return state.kb;
 }
 
@@ -1612,6 +1740,10 @@ function historyCard(c) {
   const item = c.matched_slug ? state.kb.get(c.matched_slug) : null;
   const isImage = c.source === "image";
   const admin = isAdminReply(c);
+  const sugg = suggestionState(c, state.kb);
+  const suggTitle = sugg === "added" && c.suggestion_kb_item_id
+    ? `Đã thêm vào mục ${state.kb.get(c.suggestion_kb_item_id)?.title ?? c.suggestion_kb_item_id}`
+    : null;
   const piiHere = hasPii(c.question, c.image_text);
   const photo = isImage ? safePhotoUrl(c.photo_url) : null;
   const openLabel = revealLabel(!!photo, piiHere);
@@ -1726,14 +1858,148 @@ function historyCard(c) {
         c.reply_text
           ? h("div", { class: "quote" }, c.reply_text)
           : h("p", { class: "muted" }, "Bot không gửi tin nào."),
-        item ? h("div", { class: "actions" },
-          h("button", { class: "btn", onclick: () => itemEditor({
+        item || sugg ? h("div", { class: "actions" },
+          sugg === "added"
+            ? h("span", { class: "chip st-ok", title: suggTitle }, "✓ Đã thêm vào gợi ý")
+            : sugg === "button"
+              ? h("button", { class: "btn", onclick: () => suggestionDialog(c, () => card.replaceWith(historyCard(c))) },
+                "Thêm vào câu gợi ý")
+              : null,
+          item ? h("button", { class: "btn", onclick: () => itemEditor({
             slug: c.matched_slug, form: itemToForm(c.matched_slug, item), onDone: () => go("history"),
-          }) }, "Mở mục")) : null,
+          }) }, "Mở mục") : null) : null,
       ),
     ) : null,
   );
   return card;
+}
+
+/**
+ * Hộp thoại "Thêm vào câu gợi ý" (spec mục 4, 5). Ô nội dung điền sẵn câu đã bỏ @bot và ẩn thông tin cá nhân;
+ * câu còn thông tin cá nhân thì không lưu được. Hàm addSuggestedQuestion kiểm tra lại và ghi.
+ */
+function suggestionDialog(c, onChanged) {
+  const approved = [...state.kb].filter(([, d]) => d.status === "approved")
+    .sort((a, b) => String(a[1].title ?? a[0]).localeCompare(String(b[1].title ?? b[0]), "vi"));
+  const prefill = suggestionPrefill(c.question, state.botName);
+  const text = h("textarea", { rows: 3, value: prefill });
+  const count = h("div", { class: "count" });
+  const search = h("input", { type: "search", placeholder: "Tìm mục theo tên hoặc mã…", autocomplete: "off" });
+  const pick = h("select", {});
+  const fillPick = (keep) => {
+    const needle = unaccent(search.value).trim();
+    const rows = approved.filter(([slug, d]) => slug === keep || !needle || unaccent(`${d.title ?? ""} ${slug}`).includes(needle));
+    pick.replaceChildren(...rows.map(([slug, d]) =>
+      h("option", { value: slug }, `${d.title ?? slug} (${slug})${slug === c.matched_slug ? " · bot chọn" : ""}`)));
+    if (rows.some(([slug]) => slug === keep)) pick.value = keep;
+  };
+  fillPick(c.matched_slug);
+  const lowConf = lowSuggestionConfidence(c.confidence, state.suggestWarn)
+    ? msg("warn", `Bot chọn mục này với độ tin cậy thấp (${c.confidence.toFixed(2)}). Kiểm tra đúng mục trước khi thêm.`)
+    : null;
+  const piiNote = prefill.includes(PII_MASK)
+    ? msg("warn", `Câu gốc có thông tin cá nhân, đã thay bằng ${PII_MASK}. Xóa hoặc viết lại phần đó trước khi lưu.`)
+    : null;
+  const existing = h("div");
+  const notes = h("div");
+  const errBox = h("div");
+  const saveBtn = h("button", { class: "btn primary" }, "Lưu");
+  let force = false;
+  let serverOthers = null;
+
+  const refresh = () => {
+    const chk = checkSuggestion(text.value, pick.value, state.kb, state.botName);
+    count.textContent = `${chk.length}/${SUGGESTION_MAX_CHARS} ký tự (tối thiểu ${SUGGESTION_MIN_CHARS})`;
+    count.className = chk.length > SUGGESTION_MAX_CHARS || chk.length < SUGGESTION_MIN_CHARS ? "count over" : "count";
+    const target = state.kb.get(pick.value);
+    const qs = (target?.questions ?? []).filter((q) => typeof q === "string");
+    existing.replaceChildren(target ? h("details", { class: "card", style: "margin:8px 0" },
+      h("summary", {}, `${qs.length}/${MAX_QUESTIONS} cách hỏi hiện có của mục này`),
+      qs.length ? h("ul", { style: "margin:6px 0 0; padding-left:18px" }, qs.map((q) => h("li", {}, q)))
+        : h("p", { class: "muted" }, "(chưa có)")) : null);
+    const others = serverOthers ?? chk.others;
+    notes.replaceChildren(...nodes(
+      chk.errors.length ? list("errs", chk.errors) : null,
+      chk.same ? msg("ok", "Câu này đã có trong mục. Bấm Lưu để đánh dấu bản ghi là đã xử lý, không thêm bản trùng.") : null,
+      chk.accentOnly ? msg("warn", `Mục đã có câu chỉ khác dấu: "${chk.accentOnly}". Vẫn thêm được (người dùng hay gõ không dấu).`) : null,
+      !chk.same && others.length
+        ? msg("bad", `Câu này đang là gợi ý của mục ${others.map((o) => `"${o.title}"`).join(", ")}. `
+          + "Bấm Vẫn thêm nếu chắc chắn (sẽ hỏi xác nhận lần nữa).")
+        : null,
+    ));
+    saveBtn.disabled = chk.errors.length > 0;
+    saveBtn.textContent = !chk.same && others.length ? "Vẫn thêm" : "Lưu";
+    return { chk, others };
+  };
+  text.addEventListener("input", () => ((serverOthers = null), (force = false), refresh()));
+  search.addEventListener("input", () => (fillPick(pick.value), refresh()));
+  pick.addEventListener("change", () => ((serverOthers = null), (force = false), refresh()));
+
+  const finish = (kind, message) => {
+    onChanged();
+    openDialog(h("h2", {}, "Thêm vào câu gợi ý"), msg(kind, message),
+      h("div", { class: "actions" }, h("button", { class: "btn primary", onclick: closeDialog }, "Đóng")));
+  };
+  const mark = (slug) => {
+    c.suggestion_added_at = new Date();
+    c.suggestion_kb_item_id = slug;
+  };
+  const save = async () => {
+    const { chk, others } = refresh();
+    if (chk.errors.length) return;
+    if (!chk.same && others.length && !force) {
+      if (!confirm(`Câu này đang là gợi ý của mục ${others.map((o) => `"${o.title}"`).join(", ")}.\n\nVẫn thêm vào mục đã chọn?`)) return;
+      force = true;
+    }
+    const slug = pick.value;
+    errBox.replaceChildren();
+    saveBtn.disabled = true;
+    try {
+      const { data } = await addSuggestionCall({ historyId: c.id, kbItemId: slug, question: chk.question, force });
+      const title = state.kb.get(slug)?.title ?? slug;
+      if (data.status === "added") {
+        const d = state.kb.get(slug);
+        if (d) d.questions = [...(d.questions ?? []), chk.question];
+        mark(slug);
+        finish("ok", `Đã thêm vào mục "${title}" (${data.questionCount}/${MAX_QUESTIONS} cách hỏi). `
+          + "Bot dùng câu mới sau tối đa khoảng 1 phút.");
+      } else if (data.status === "duplicate_same") {
+        mark(slug);
+        finish("ok", "Câu này đã có trong mục. Đã đánh dấu bản ghi là đã xử lý, không thêm bản trùng.");
+      } else if (data.status === "already_added") {
+        mark(data.kbItemId ?? slug);
+        finish("ok", "Bản ghi này đã được thêm vào gợi ý trước đó (có thể ở máy khác).");
+      } else if (data.status === "duplicate_other") {
+        // Kho trên trang cũ hơn máy chủ: hiện cảnh báo đỏ, chờ bấm Vẫn thêm.
+        serverOthers = data.others ?? [];
+        force = false;
+        refresh();
+      }
+    } catch (e) {
+      errBox.replaceChildren(msg("bad", fnErrText(e, "addSuggestedQuestion")));
+      refresh();
+    }
+  };
+  saveBtn.addEventListener("click", save);
+
+  openDialog(
+    h("h2", {}, "Thêm vào câu gợi ý"),
+    h("p", { class: "muted" }, "Câu được thêm vào \"Các cách hỏi\" của mục để AI nhận ra cách hỏi này. ",
+      "Người dùng Zalo không thấy danh sách này."),
+    h("label", { class: "f" }, "Nội dung", h("span", { class: "hint" }, " sửa lỗi chính tả, bỏ phần thừa")),
+    text,
+    count,
+    piiNote,
+    h("label", { class: "f" }, "Mục kho"),
+    search,
+    pick,
+    lowConf,
+    existing,
+    notes,
+    errBox,
+    h("div", { class: "actions" }, h("button", { class: "btn", onclick: closeDialog }, "Hủy"), saveBtn),
+  );
+  refresh();
 }
 
 /** Ảnh gốc từ link Zalo: mờ đến khi bấm Xem ảnh (ghi pii_views); link hỏng thì báo. */
@@ -2814,6 +3080,10 @@ async function renderSettings(notice) {
   const reply = h("input", { type: "checkbox", checked: f.reply_enabled, onchange: (e) => (f.reply_enabled = e.target.checked) });
   const threshold = h("input", { type: "number", min: 0, max: 1, step: 0.05, value: f.confidence_threshold, style: "max-width:140px" });
   threshold.addEventListener("input", () => (f.confidence_threshold = threshold.value));
+  const suggestWarn = h("input", {
+    type: "number", min: 0, max: 1, step: 0.05, value: f.suggestion_warn_confidence, style: "max-width:140px",
+  });
+  suggestWarn.addEventListener("input", () => (f.suggestion_warn_confidence = suggestWarn.value));
   const handoff = h("textarea", { rows: 3, value: f.handoff_message });
   const handoffCount = h("div", { class: "count" });
   const countHandoff = () => {
@@ -2882,6 +3152,9 @@ async function renderSettings(notice) {
       h("label", { class: "f" }, "Số ảnh gửi mỗi câu trả lời",
         h("span", { class: "hint" }, ` 0-${MAX_IMAGES}; mỗi ảnh tính 1 tin; ảnh vượt số này thành link; 0 = không gửi ảnh`)),
       maxImages,
+      h("label", { class: "f" }, "Ngưỡng cảnh báo khi thêm câu gợi ý",
+        h("span", { class: "hint" }, " 0-1; ở tab Lịch sử, bot chọn mục với độ tin cậy dưới ngưỡng thì hộp thoại cảnh báo vàng; không ảnh hưởng bot")),
+      suggestWarn,
     ),
     h("div", { class: "card" },
       h("h3", { style: "margin-top:0" }, "Đọc ảnh người dùng gửi"),
