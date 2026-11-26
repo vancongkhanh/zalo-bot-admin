@@ -676,6 +676,41 @@ function lastNDays(n, now = new Date()) {
   return out;
 }
 
+/** Số ngày tối đa của bộ lọc Thống kê (bảng "Theo ngày" mỗi ngày một dòng). */
+const STATS_MAX_DAYS = 366;
+
+/** Mặc định của Thống kê: ngày 1 tháng hiện tại → hôm nay, theo giờ Việt Nam. */
+function defaultStatsRange(now = new Date()) {
+  const to = dayKey(now);
+  return { from: `${to.slice(0, 8)}01`, to };
+}
+
+/** "YYYY-MM-DD" có thật trên lịch → mili giây UTC; sai thì null. */
+function parseDayKey(s) {
+  if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  const ms = Date.parse(`${s}T00:00:00Z`);
+  return Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 10) === s ? ms : null;
+}
+
+/**
+ * Các ngày từ `from` đến `to` (gồm cả hai đầu), cũ → mới.
+ * @returns {{days: string[]} | {error: string}}
+ */
+function daysInRange(from, to, max = STATS_MAX_DAYS) {
+  const a = parseDayKey(from);
+  const b = parseDayKey(to);
+  if (a === null || b === null) return { error: "Chọn đủ ngày bắt đầu và ngày kết thúc." };
+  if (a > b) return { error: "Ngày bắt đầu phải trước hoặc trùng ngày kết thúc." };
+  const n = Math.round((b - a) / 86400000) + 1;
+  if (n > max) return { error: `Chọn tối đa ${max} ngày (đang chọn ${n} ngày).` };
+  return { days: Array.from({ length: n }, (_, i) => new Date(a + i * 86400000).toISOString().slice(0, 10)) };
+}
+
+/** Nhãn ngày trong bảng: "dd/mm", thêm năm khi khoảng ngày trải qua hai năm. */
+function statsDayLabel(day, withYear) {
+  return `${day.slice(8)}/${day.slice(5, 7)}${withYear ? `/${day.slice(0, 4)}` : ""}`;
+}
+
 /**
  * @param {Array<{id: string, data: object}>} docs  stats_daily
  * @param {string[]} days
@@ -1474,6 +1509,24 @@ function renderTabs() {
     h("button", { class: state.tab === id ? "on" : "", onclick: () => go(id) }, label)));
 }
 
+/** Nút "Tải lại" ở đầu các màn danh sách: đọc lại từ Firestore, giữ bộ lọc đang chọn. */
+function reloadButton(onReload) {
+  const btn = h("button", { class: "btn", type: "button", title: "Đọc lại danh sách mới nhất" }, "↻ Tải lại");
+  btn.addEventListener("click", async () => {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    try {
+      await onReload();
+    } catch (e) {
+      console.error(e);
+      alert(errText(e));
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  return btn;
+}
+
 async function go(tab) {
   state.tab = tab;
   renderTabs();
@@ -1713,6 +1766,10 @@ function drawHistory(notice) {
         sel(hist.chatId, [["", "Mọi nhóm"], ...hist.chats.map((c) => [c.id, c.label || c.id])],
           (v) => ((hist.chatId = v), reload())),
         search,
+        reloadButton(async () => {
+          await loadKb();
+          await reload();
+        }),
       ),
       h("p", { class: "muted", style: "margin:8px 0 0" },
         "Chỉ hiện tin có gọi tên bot. Nhật ký giữ 90 ngày. Thông tin cá nhân (tên, số điện thoại, CCCD, mã hồ sơ, ",
@@ -2087,9 +2144,12 @@ async function renderUnanswered(notice) {
   show(
     notice ?? null,
     reply.error ? msg("warn", `Chưa đọc được danh sách người hỏi (${errText(reply.error)}). Các nút cũ vẫn dùng được.`) : null,
-    h("p", { class: "muted" },
-      `${snap.size} câu đang chờ xử lý${snap.size === 100 ? " (hiện 100 câu hỏi nhiều nhất)" : ""}. `,
-      "Câu đã có đáp án sẽ được bot dùng sau tối đa khoảng 1 phút khi mục ở trạng thái Đã duyệt."),
+    h("div", { class: "row", style: "align-items:flex-start;margin-bottom:8px" },
+      h("p", { class: "muted grow", style: "margin:0" },
+        `${snap.size} câu đang chờ xử lý${snap.size === 100 ? " (hiện 100 câu hỏi nhiều nhất)" : ""}. `,
+        "Câu đã có đáp án sẽ được bot dùng sau tối đa khoảng 1 phút khi mục ở trạng thái Đã duyệt."),
+      reloadButton(() => go("unanswered")),
+    ),
     cards.length ? cards : h("div", { class: "card center muted" }, "Không còn câu nào chưa trả lời."),
     waiting.length
       ? [h("h3", { style: "margin:20px 0 8px;font-size:16px" }, "Đã có đáp án, còn người chưa được trả lời"),
@@ -2900,6 +2960,7 @@ async function renderKb(notice) {
     notice ?? null,
     h("div", { class: "row", style: "margin-bottom:12px" },
       search, statusSel, topicSel,
+      reloadButton(() => go("kb")),
       h("button", {
         class: "btn primary",
         onclick: () => itemEditor({ slug: null, form: itemToForm("", null), onDone: () => renderKb(msg("ok", "Đã thêm mục.")) }),
@@ -2911,7 +2972,8 @@ async function renderKb(notice) {
 }
 
 // ---------- Màn: Thống kê ----------
-let statsDays = 7;
+/** Khoảng ngày đang xem; null = mặc định (đầu tháng → hôm nay), giữ nguyên khi chuyển tab. */
+let statsRange = null;
 
 /** Biểu đồ tròn (vành khuyên) các mục được dùng nhiều nhất, kèm chú thích có số lượt và phần trăm. */
 function itemsPie(s) {
@@ -2965,7 +3027,13 @@ function vndBox(cost) {
 
 async function renderStats() {
   const now = new Date();
-  const days = lastNDays(statsDays, now);
+  statsRange ??= defaultStatsRange(now);
+  let range = daysInRange(statsRange.from, statsRange.to);
+  if (range.error) {
+    statsRange = defaultStatsRange(now);
+    range = daysInRange(statsRange.from, statsRange.to);
+  }
+  const days = range.days;
   const month = monthKey(now);
   const [statSnap, usageSnap, cfgSnap] = await Promise.all([
     getDocs(query(collection(db, "stats_daily"), where(documentId(), ">=", days[0]), where(documentId(), "<=", days.at(-1)))),
@@ -2992,16 +3060,33 @@ async function renderStats() {
     return h("div", { class: "meter" }, h("i", { class: r >= 0.8 ? "hot" : "", style: `width:${(r * 100).toFixed(1)}%` }));
   };
   const tile = (label, value, extra) => h("div", { class: "tile" }, h("span", { class: "muted" }, label), h("b", {}, value), extra ?? null);
-  const rangeSel = h("select", { style: "width:auto" }, [7, 30, 90].map((n) => h("option", { value: n }, `${n} ngày gần nhất`)));
-  rangeSel.value = String(statsDays);
-  rangeSel.addEventListener("change", () => {
-    statsDays = Number(rangeSel.value);
+  const today = dayKey(now);
+  const fromInput = h("input", { type: "date", value: statsRange.from, max: today, style: "width:auto", "aria-label": "Từ ngày" });
+  const toInput = h("input", { type: "date", value: statsRange.to, max: today, style: "width:auto", "aria-label": "Đến ngày" });
+  const rangeErr = h("div", { class: "msg bad", hidden: true });
+  const applyRange = () => {
+    const r = daysInRange(fromInput.value, toInput.value);
+    rangeErr.hidden = !r.error;
+    rangeErr.textContent = r.error ?? "";
+    if (r.error) return;
+    statsRange = { from: fromInput.value, to: toInput.value };
     go("stats");
-  });
+  };
+  fromInput.addEventListener("change", applyRange);
+  toInput.addEventListener("change", applyRange);
+  const resetBtn = h("button", { class: "btn", type: "button", onclick: () => ((statsRange = null), go("stats")) }, "Tháng này");
+  const withYear = days[0].slice(0, 4) !== days.at(-1).slice(0, 4);
   const maxQ = Math.max(1, ...s.rows.map((r) => r.questions));
 
   show(
-    h("div", { class: "row", style: "margin:0 0 8px" }, h("h2", { class: "grow", style: "margin:0" }, "Câu hỏi qua AI"), rangeSel),
+    h("div", { class: "row", style: "margin:0 0 8px" },
+      h("h2", { class: "grow", style: "margin:0" }, "Câu hỏi qua AI"),
+      h("label", { class: "row muted", style: "gap:6px;margin:0" }, "Từ", fromInput),
+      h("label", { class: "row muted", style: "gap:6px;margin:0" }, "đến", toInput),
+      resetBtn,
+      reloadButton(() => go("stats")),
+    ),
+    rangeErr,
     h("div", { class: "tiles" },
       tile("Câu hỏi", fmtNum.format(s.totals.questions)),
       tile("Bot tự trả lời", `${fmtNum.format(s.totals.answered)} (${pct(s.autoRate)})`),
@@ -3009,7 +3094,9 @@ async function renderStats() {
       tile("Lỗi AI", fmtNum.format(s.totals.ai_errors)),
       tile("Câu hỏi bằng ảnh", fmtNum.format(s.totals.image_questions)),
     ),
-    h("p", { class: "muted" }, "Chỉ tính câu đi qua luồng AI (khi ai_enabled bật). Số liệu tổng của mọi nhóm."),
+    h("p", { class: "muted" },
+      `${days.length} ngày, từ ${statsDayLabel(days[0], true)} đến ${statsDayLabel(days.at(-1), true)}. `,
+      "Chỉ tính câu đi qua luồng AI (khi ai_enabled bật). Số liệu tổng của mọi nhóm."),
     h("div", { class: "card" },
       h("h3", { style: "margin-top:0" }, "Mục được dùng nhiều nhất"),
       itemsPie(s),
@@ -3020,7 +3107,7 @@ async function renderStats() {
         h("tr", {}, h("th", {}, "Ngày"), h("th", { class: "n" }, "Câu hỏi"), h("th", { class: "n" }, "Tự trả lời"),
           h("th", { class: "n" }, "Chuyển ca"), h("th", { class: "n" }, "Lỗi AI"), h("th", { style: "width:30%" }, "")),
         [...s.rows].reverse().map((r) => h("tr", {},
-          h("td", {}, `${r.day.slice(8)}/${r.day.slice(5, 7)}`),
+          h("td", {}, statsDayLabel(r.day, withYear)),
           h("td", { class: "n" }, r.questions), h("td", { class: "n" }, r.answered),
           h("td", { class: "n" }, r.handoff), h("td", { class: "n" }, r.ai_errors),
           h("td", {}, h("div", { class: "meter" }, h("i", { style: `width:${((r.questions / maxQ) * 100).toFixed(1)}%` }))),
@@ -3028,6 +3115,7 @@ async function renderStats() {
       ),
     ),
     h("h2", { style: "margin-top:22px" }, `Tháng ${month.slice(5)}/${month.slice(0, 4)}`),
+    h("p", { class: "muted", style: "margin-top:-6px" }, "Hạn mức và chi phí của tháng hiện tại, không theo khoảng ngày ở trên."),
     h("div", { class: "tiles" },
       tile("Tin đã gửi (hạn mức Zalo)", `${fmtNum.format(sent)} / ${fmtNum.format(msgLimit)}`, meter(sent, msgLimit)),
       tile("Lỗi gửi tin", fmtNum.format(usage.send_errors ?? 0)),
